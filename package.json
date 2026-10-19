@@ -12,6 +12,8 @@
     "dev": "pnpm build:shared && run-p dev:webapp dev:server",
     "dev:webapp": "pnpm --filter ./packages/webapp dev",
     "dev:server": "pnpm --filter ./packages/server dev",
+    "dev:devbox": "pnpm build:shared && run-p dev:devbox:webapp dev:server",
+    "dev:devbox:webapp": "devbox run web -- sh -c 'cd packages/webapp && exec node devbox-dev.mjs'",
     "build:server": "pnpm build:shared && pnpm --filter ./packages/server build",
     "build:webapp": "pnpm build:shared && pnpm --filter ./packages/webapp build",
     "format": "prettier --write \"packages/**/*.{js,ts,tsx,css}\"",

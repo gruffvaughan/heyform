@@ -19,6 +19,7 @@ const STATE_TTL = '10m'
 const TOKEN_REQUEST_TIMEOUT = 15_000
 // Revocation is best effort, so it shouldn't hold up deleting an integration
 const REVOKE_REQUEST_TIMEOUT = 10_000
+const REVOKE_LOCK_TTL = '10s'
 // Refresh a little before the provider's expiry, so a token doesn't expire
 // between being handed to run() and being used
 const EXPIRY_MARGIN = 60_000
@@ -266,50 +267,59 @@ export class IntegrationAuthService {
       return
     }
 
+    const app = this.appService.findById(integration.appId)
+    const provider = app ? this.appService.findOAuth2Provider(app) : undefined
     const record = await this.thirdPartyService.findById(integration.thirdPartyOauthId)
+    const tokens = record ? this.readTokens(record) : undefined
+    const token = tokens?.refreshToken || tokens?.accessToken
 
-    if (record) {
-      await this.revoke(integration, record)
+    if (!provider?.revokeUrl || !token) {
+      await this.thirdPartyService.delete(integration.thirdPartyOauthId)
+      return
     }
 
-    await this.thirdPartyService.delete(integration.thirdPartyOauthId)
+    // Providers like Google revoke the whole grant, which other connections
+    // on this server may share if they're for the same account. Accounts
+    // aren't known, so the grant is only revoked with the last connection.
+    // Checking and deleting under one lock means two deletes at once can't
+    // each leave the grant to the other.
+    const isLast = await this.redisService.withLock(
+      `integration_revoke:${provider.id}`,
+      REVOKE_LOCK_TTL,
+      async () => {
+        const shared = await this.thirdPartyService.existsForApps(
+          this.appIdsOf(provider.id),
+          integration.thirdPartyOauthId!
+        )
+        await this.thirdPartyService.delete(integration.thirdPartyOauthId!)
+        return !shared
+      }
+    )
+
+    if (isLast) {
+      await this.revoke(provider, integration, token, !!tokens!.refreshToken)
+    } else {
+      this.logger.info(
+        `Not revoking the ${provider.name} grant of integration ${integration.id}: other connections may share it`
+      )
+    }
   }
 
   /**
-   * Revokes the connection's grant at the provider (RFC 7009). Never throws:
-   * a provider without a revoke endpoint, unreadable tokens, or a failed
-   * request leave the grant for the account owner to remove.
+   * Revokes a grant at the provider (RFC 7009). Never throws: a failed
+   * request leaves the grant for the account owner to remove.
    */
-  private async revoke(integration: IntegrationModel, record: ThirdPartyOauthModel) {
-    const app = this.appService.findById(integration.appId)
-    const provider = app ? this.appService.findOAuth2Provider(app) : undefined
-
-    if (!app || !provider?.revokeUrl) {
-      return
-    }
-
-    const tokens = this.readTokens(record)
-    const token = tokens?.refreshToken || tokens?.accessToken
-
-    if (!token) {
-      return
-    }
-
+  private async revoke(
+    provider: ConfiguredOAuth2Provider,
+    integration: IntegrationModel,
+    token: string,
+    isRefreshToken: boolean
+  ) {
     try {
-      // Providers like Google revoke the whole grant, which other connections
-      // on this server may share if they're for the same account. Accounts
-      // aren't known, so the grant is only revoked with the last connection.
-      if (await this.thirdPartyService.existsForApps(this.appIdsOf(provider.id), record.id)) {
-        this.logger.info(
-          `Not revoking the ${provider.name} grant of integration ${integration.id}: other connections may share it`
-        )
-        return
-      }
-
-      const response = await got.post(provider.revokeUrl, {
+      const response = await got.post(provider.revokeUrl!, {
         form: {
           token,
-          token_type_hint: tokens!.refreshToken ? 'refresh_token' : 'access_token',
+          token_type_hint: isRefreshToken ? 'refresh_token' : 'access_token',
           client_id: provider.clientId,
           client_secret: provider.clientSecret
         },

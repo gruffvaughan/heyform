@@ -104,6 +104,7 @@ function createStores() {
   const integrations = new Map<string, any>()
   const oauthRecords = new Map<string, any>()
   const redis = new Map<string, string>()
+  const lockQueues = new Map<string, Promise<unknown>>()
   // Integrations whose waiting submissions were resent
   const resent: string[] = []
   // Submissions kept waiting for a reconnect
@@ -173,6 +174,13 @@ function createStores() {
       const value = redis.get(key) ?? null
       redis.delete(key)
       return value
+    },
+    // Runs callbacks for the same key one after another, like the Redis lock
+    withLock: async (key: string, _ttl: string, callback: () => Promise<any>) => {
+      const previous = lockQueues.get(key) ?? Promise.resolve()
+      const run = previous.catch(() => undefined).then(callback)
+      lockQueues.set(key, run)
+      return run
     }
   }
 
@@ -249,9 +257,10 @@ function createAuth() {
 async function connect(
   ctx: ReturnType<typeof createAuth>,
   tokens: { accessToken?: string; refreshToken?: string; expiresAt?: number },
-  integration: Record<string, any> = {}
+  integration: Record<string, any> = {},
+  openId = 'x'
 ) {
-  const oauthId = await ctx.thirdPartyService.createOrUpdate('fakeapp', 'x', 'rows.read', {
+  const oauthId = await ctx.thirdPartyService.createOrUpdate('fakeapp', openId, 'rows.read', {
     tokens: {
       accessToken: tokens.accessToken
         ? encryptSecret(tokens.accessToken, process.env.FORM_ENCRYPTION_KEY)
@@ -874,6 +883,29 @@ async function testGrantSharedWithAnotherConnectionIsKept() {
   assert.match(logged[0], /other connections may share it/)
 }
 
+async function testConcurrentDeletesStillRevokeTheGrant() {
+  const ctx = createAuth()
+  // Two forms' connections, deleted at the same moment
+  const first = await connect(ctx, { accessToken: 'a1', refreshToken: 'r1' })
+  const second = await connect(
+    ctx,
+    { accessToken: 'a2', refreshToken: 'r2' },
+    { formId: 'form_2' },
+    'form_2'
+  )
+  provider.requests = []
+  provider.handler = () => ({ status: 200, body: {} })
+
+  await Promise.all([
+    ctx.service.disconnect(ctx.integrations.get(first.integrationId)),
+    ctx.service.disconnect(ctx.integrations.get(second.integrationId))
+  ])
+
+  assert.strictEqual(ctx.oauthRecords.size, 0)
+  // The last one to go revokes the grant
+  assert.strictEqual(provider.revokeRequests.length, 1)
+}
+
 async function testTurningOnResendsWaitingSubmissions() {
   const ctx = createAuth()
   const { integrationId } = await connect(
@@ -1309,6 +1341,7 @@ async function run() {
     await testFailedRevocationNeverBlocksDeletion()
     await testNothingToRevokeStillDeletes()
     await testGrantSharedWithAnotherConnectionIsKept()
+    await testConcurrentDeletesStillRevokeTheGrant()
     await testTurningOnResendsWaitingSubmissions()
     await testValidTokenIsUsedWithoutRefresh()
     await testExpiredTokenIsRefreshed()

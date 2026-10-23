@@ -43,10 +43,14 @@ const NEEDS_RECONNECT = IntegrationStatusEnum.NEEDS_RECONNECT
 // --- fake OAuth2 provider ---------------------------------------------------
 
 interface TokenRequest {
+  path: string
   params: Record<string, string>
 }
 
-type TokenHandler = (params: Record<string, string>) => { status: number; body: unknown }
+type TokenHandler = (
+  params: Record<string, string>,
+  path: string
+) => { status: number; body: unknown }
 
 class FakeProvider {
   requests: TokenRequest[] = []
@@ -56,9 +60,10 @@ class FakeProvider {
     req.on('data', chunk => (raw += chunk))
     req.on('end', () => {
       const params = Object.fromEntries(new URLSearchParams(raw))
-      this.requests.push({ params })
+      const path = req.url ?? ''
+      this.requests.push({ path, params })
 
-      const { status, body } = this.handler(params)
+      const { status, body } = this.handler(params, path)
       res.writeHead(status, { 'content-type': 'application/json' })
       res.end(JSON.stringify(body))
     })
@@ -74,6 +79,19 @@ class FakeProvider {
 
   get tokenUrl(): string {
     return `http://127.0.0.1:${(this.server.address() as AddressInfo).port}/token`
+  }
+
+  get revokeUrl(): string {
+    return `http://127.0.0.1:${(this.server.address() as AddressInfo).port}/revoke`
+  }
+
+  // Requests made to the token endpoint
+  get tokenRequests(): TokenRequest[] {
+    return this.requests.filter(r => r.path === '/token')
+  }
+
+  get revokeRequests(): TokenRequest[] {
+    return this.requests.filter(r => r.path === '/revoke')
   }
 }
 
@@ -128,6 +146,8 @@ function createStores() {
       oauthRecords.set(id, { ...oauthRecords.get(id), ...updates })
       return true
     },
+    existsForApps: async (appIds: string[], exceptId: string) =>
+      [...oauthRecords.values()].some(r => appIds.includes(r.appId) && r.id !== exceptId),
     delete: async (id: string) => oauthRecords.delete(id)
   }
 
@@ -175,6 +195,7 @@ function createAppService(apps: AppDefinition[] = [oauthApp, apiKeyApp, webhook]
       name: 'Fake',
       authorizeUrl: 'https://auth.fake.example/authorize',
       tokenUrl: provider.tokenUrl,
+      revokeUrl: provider.revokeUrl,
       authorizeParams: { access_type: 'offline' },
       pkce: true
     },
@@ -546,7 +567,7 @@ async function testCompleteAuthorizationStoresEncryptedTokens() {
 
   await ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-1', 'verifier-1')
 
-  assert.deepStrictEqual(provider.requests[0].params, {
+  assert.deepStrictEqual(provider.tokenRequests[0].params, {
     grant_type: 'authorization_code',
     code: 'code-1',
     redirect_uri: 'https://heyform.example.com/api/integrations/oauth/callback',
@@ -604,11 +625,14 @@ async function testReconnectRestoresStatusAndKeepsRefreshToken() {
   )
   provider.handler = () => ({ status: 200, body: { access_token: 'access-new', expires_in: 60 } })
 
+  provider.requests = []
   await ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-2')
 
   const integration = ctx.integrations.get(integrationId)
   assert.strictEqual(integration.status, IntegrationStatusEnum.ACTIVE)
   assert.ok(!ctx.oauthRecords.has(oauthId), 'the replaced connection is deleted')
+  // The same account's new tokens share its grant, so nothing is revoked
+  assert.deepStrictEqual(provider.revokeRequests, [])
 
   const tokens = storedTokens(ctx, integration.thirdPartyOauthId)
   assert.strictEqual(tokens.accessToken, 'access-new')
@@ -655,10 +679,7 @@ async function testSettingsNeedAConnectedAccount() {
   )
 }
 
-async function testDeletingTheIntegrationDropsItsTokens() {
-  const ctx = createAuth()
-  const { oauthId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
-  const deleted: string[] = []
+function deleteIntegration(ctx: ReturnType<typeof createAuth>, deleted: string[] = []) {
   const integrationService = {
     ...ctx.integrationService,
     delete: async (formId: string, appId: string) => {
@@ -667,13 +688,126 @@ async function testDeletingTheIntegrationDropsItsTokens() {
     }
   }
 
-  await new DeleteIntegrationSettingsResolver(
+  return new DeleteIntegrationSettingsResolver(
     integrationService,
     ctx.service
   ).deleteIntegrationSettings({ formId: 'form_1', appId: 'fakeapp' })
+}
+
+function captureLogs(ctx: ReturnType<typeof createAuth>) {
+  const logged: string[] = []
+  const log = (message: string) => logged.push(message)
+  ;(ctx.service as any).logger = { info: log, warn: log, error: log }
+  return logged
+}
+
+async function testDeletingTheIntegrationDropsItsTokens() {
+  const ctx = createAuth()
+  const { oauthId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  const deleted: string[] = []
+  provider.requests = []
+  provider.handler = () => ({ status: 200, body: {} })
+
+  await deleteIntegration(ctx, deleted)
 
   assert.deepStrictEqual(deleted, ['form_1/fakeapp'])
   assert.strictEqual(ctx.oauthRecords.has(oauthId), false)
+
+  // Revoked at the provider, with the refresh token so the grant goes
+  assert.deepStrictEqual(provider.revokeRequests, [
+    {
+      path: '/revoke',
+      params: {
+        token: 'r',
+        token_type_hint: 'refresh_token',
+        client_id: 'fake-client-id',
+        client_secret: 'fake-client-secret'
+      }
+    }
+  ])
+}
+
+async function testRevokesAnAccessTokenWithoutRefreshToken() {
+  const ctx = createAuth()
+  await connect(ctx, { accessToken: 'a' })
+  provider.requests = []
+  provider.handler = () => ({ status: 200, body: {} })
+
+  await deleteIntegration(ctx)
+
+  assert.deepStrictEqual(
+    provider.revokeRequests.map(r => [r.params.token, r.params.token_type_hint]),
+    [['a', 'access_token']]
+  )
+}
+
+async function testFailedRevocationNeverBlocksDeletion() {
+  // The provider refuses
+  const refused = createAuth()
+  const refusedLogs = captureLogs(refused)
+  const { oauthId } = await connect(refused, { accessToken: 'secret-a', refreshToken: 'secret-r' })
+  provider.handler = () => ({ status: 503, body: { error: 'unavailable' } })
+
+  await deleteIntegration(refused)
+  assert.strictEqual(refused.oauthRecords.has(oauthId), false)
+  assert.match(
+    refusedLogs.join('\n'),
+    /didn't revoke the grant of integration integration_\d+: HTTP 503/
+  )
+
+  // The provider can't be reached
+  const unreachable = createAuth()
+  const unreachableLogs = captureLogs(unreachable)
+  unreachable.appService.providers.fake.revokeUrl = 'http://127.0.0.1:1/revoke'
+  const second = await connect(unreachable, { accessToken: 'secret-a', refreshToken: 'secret-r' })
+
+  await deleteIntegration(unreachable)
+  assert.strictEqual(unreachable.oauthRecords.has(second.oauthId), false)
+  assert.match(unreachableLogs.join('\n'), /failed: ECONNREFUSED/)
+
+  for (const message of [...refusedLogs, ...unreachableLogs]) {
+    assert.ok(!/secret-/.test(message), 'tokens stay out of logs')
+  }
+}
+
+async function testNothingToRevokeStillDeletes() {
+  // No revoke endpoint
+  const ctx = createAuth()
+  delete ctx.appService.providers.fake.revokeUrl
+  const { oauthId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  provider.requests = []
+
+  await deleteIntegration(ctx)
+  assert.strictEqual(ctx.oauthRecords.has(oauthId), false)
+
+  // Tokens that no longer decrypt
+  const unreadable = createAuth()
+  const connected = await connect(unreadable, { accessToken: 'a', refreshToken: 'r' })
+  unreadable.oauthRecords.get(connected.oauthId).tokens.refreshToken = encryptSecret('r', 'old-key')
+
+  await deleteIntegration(unreadable)
+  assert.strictEqual(unreadable.oauthRecords.has(connected.oauthId), false)
+  assert.deepStrictEqual(provider.revokeRequests, [])
+}
+
+async function testGrantSharedWithAnotherConnectionIsKept() {
+  const ctx = createAuth()
+  const logged = captureLogs(ctx)
+  const { oauthId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  // Another form's connection through the same provider, which may be the
+  // same account and so the same grant
+  const other = await ctx.thirdPartyService.createOrUpdate('fakeapp', 'form_2', 'rows.read', {
+    tokens: {}
+  })
+  provider.requests = []
+  provider.handler = () => ({ status: 200, body: {} })
+
+  await deleteIntegration(ctx)
+
+  assert.strictEqual(ctx.oauthRecords.has(oauthId), false)
+  assert.ok(ctx.oauthRecords.has(other), "the other form's connection is untouched")
+  assert.deepStrictEqual(provider.revokeRequests, [])
+  assert.match(logged[0], /other connections may share it/)
 }
 
 // --- refresh on use ---------------------------------------------------------
@@ -710,7 +844,7 @@ async function testExpiredTokenIsRefreshed() {
 
   assert.strictEqual(await ctx.service.getAccessToken(oauthApp, integration), 'access-new')
   assert.deepStrictEqual(
-    provider.requests.map(r => r.params),
+    provider.tokenRequests.map(r => r.params),
     [
       {
         grant_type: 'refresh_token',
@@ -1082,6 +1216,10 @@ async function run() {
     await testReconnectRestoresStatusAndKeepsRefreshToken()
     await testSettingsNeedAConnectedAccount()
     await testDeletingTheIntegrationDropsItsTokens()
+    await testRevokesAnAccessTokenWithoutRefreshToken()
+    await testFailedRevocationNeverBlocksDeletion()
+    await testNothingToRevokeStillDeletes()
+    await testGrantSharedWithAnotherConnectionIsKept()
     await testValidTokenIsUsedWithoutRefresh()
     await testExpiredTokenIsRefreshed()
     await testRevokedGrantMarksNeedsReconnect()

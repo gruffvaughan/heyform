@@ -18,6 +18,9 @@ export interface OAuth2Provider {
   authorizeParams?: Record<string, string>
   // Send a PKCE code challenge (RFC 7636) with the authorize request
   pkce?: boolean
+  // Token revocation endpoint (RFC 7009). When set, a connection's tokens are
+  // revoked there, best effort, when its integration is deleted.
+  revokeUrl?: string
 }
 
 export interface OAuth2ProviderCredentials {
@@ -32,6 +35,9 @@ export const google: OAuth2Provider = {
   name: 'Google',
   authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
   tokenUrl: 'https://oauth2.googleapis.com/token',
+  // Revokes the whole grant: every token issued to this server's OAuth client
+  // for the account, not only the token sent
+  revokeUrl: 'https://oauth2.googleapis.com/revoke',
   authorizeParams: {
     // Google only returns a refresh token for offline access, and only on the
     // consent screen, so ask for consent on every connect

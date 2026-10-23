@@ -76,6 +76,15 @@ export class ThirdPartyService {
     })
   }
 
+  // Whether a connection other than `exceptId` exists for any of the apps
+  async existsForApps(appIds: string[], exceptId: string): Promise<boolean> {
+    const found = await this.thirdPartyOauthModel.exists({
+      appId: { $in: appIds },
+      _id: { $ne: exceptId }
+    })
+    return !!found
+  }
+
   public async delete(id: string): Promise<boolean> {
     const result = await this.thirdPartyOauthModel.deleteOne({
       _id: id

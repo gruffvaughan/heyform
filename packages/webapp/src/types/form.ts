@@ -51,6 +51,19 @@ export interface IntegrationType {
   apiKeyHint?: string
 }
 
+// One delivery attempt of a submission to an integration
+export interface IntegrationRecordType {
+  id: string
+  submissionId: string
+  status: number
+  attempt: number
+  maxAttempts: number
+  willRetry: boolean
+  error?: string
+  // Unix seconds
+  createdAt: number
+}
+
 export interface FormFieldType extends FormField {
   isCollapsed?: boolean
   parent?: FormFieldType

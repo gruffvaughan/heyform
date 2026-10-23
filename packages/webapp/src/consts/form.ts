@@ -511,6 +511,11 @@ export enum INTEGRATION_STATUS_ENUM {
   NEEDS_RECONNECT
 }
 
+export enum INTEGRATION_RECORD_STATUS_ENUM {
+  SUCCEEDED = 1,
+  FAILED = 2
+}
+
 export const FORM_THEMES = [
   {
     fontFamily: 'Public Sans',

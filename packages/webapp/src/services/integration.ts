@@ -25,6 +25,7 @@ import {
   GOOGLE_SHEETS_LIST_GQL,
   GOOGLE_SHEETS_WORKSHEETS_GQL,
   HUBSPOT_OAUTH_GQL,
+  INTEGRATION_RECORDS_GQL,
   INTEGRATION_STATUS_ENUM,
   MAILCHIMP_AUDIENCES_GQL,
   MAILCHIMP_OAUTH_GQL,
@@ -104,6 +105,19 @@ export class IntegrationService {
           formId,
           appId,
           status
+        }
+      }
+    })
+  }
+
+  static async records(formId: string, appId: string) {
+    return apollo.query({
+      query: INTEGRATION_RECORDS_GQL,
+      fetchPolicy: 'no-cache',
+      variables: {
+        input: {
+          formId,
+          appId
         }
       }
     })

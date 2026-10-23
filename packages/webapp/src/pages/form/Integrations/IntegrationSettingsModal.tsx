@@ -20,6 +20,7 @@ import { useAppStore, useFormStore, useModal } from '@/store'
 import { IntegratedAppType } from '@/types'
 
 import { ApiKeyItem, ConnectAccount } from './IntegrationAuthItem'
+import IntegrationRecords from './IntegrationRecords'
 import IntegrationSettingsItem from './IntegrationSettingsItem'
 
 export interface IntegrationSettingsProps {
@@ -142,6 +143,8 @@ const Settings: FC<{ app: IntegratedAppType }> = ({ app }) => {
             )}
           </>
         )}
+
+        {app.integration && <IntegrationRecords formId={formId} appId={app.id} />}
       </div>
     </div>
   )

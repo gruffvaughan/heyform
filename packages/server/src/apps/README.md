@@ -82,9 +82,9 @@ When settings are saved, the server:
 
 ## Auth
 
-HeyForm stores the credentials, encrypted with `FORM_ENCRYPTION_KEY`, and passes `run` a
-ready-to-use `auth` value. Credentials are never sent to the browser, and app code never stores,
-decrypts or refreshes them.
+HeyForm stores the credentials, encrypted with `INTEGRATION_ENCRYPTION_KEY` (see
+[Encryption key](#encryption-key)), and passes `run` a ready-to-use `auth` value. Credentials are
+never sent to the browser, and app code never stores, decrypts or refreshes them.
 
 | `auth`                                     | The form owner                                                       | `run` receives                    |
 | ------------------------------------------ | -------------------------------------------------------------------- | --------------------------------- |
@@ -155,8 +155,29 @@ outages are retried like any other failure.
 
 While an integration needs reconnecting, its submissions wait (see [Delivery log](#delivery-log)).
 Reconnecting the account sends the waiting submissions of every integration that uses it. A saved
-API key that can no longer be decrypted (e.g. after `FORM_ENCRYPTION_KEY` changed) is treated the
-same way: entering the key again reconnects it.
+API key that can no longer be decrypted (see [Encryption key](#encryption-key)) is treated the same
+way: entering the key again reconnects it.
+
+### Encryption key
+
+API keys and OAuth2 tokens are encrypted with `INTEGRATION_ENCRYPTION_KEY` (AES-256-GCM, a key
+derived with HKDF, a random IV per value). It's separate from `FORM_ENCRYPTION_KEY`, which protects
+short-lived form tokens, so rotating either never breaks the other. Without it, apps whose `auth` is
+`apiKey` or `oauth2` are unavailable and hidden, and the server logs one warning at startup; `none`
+apps such as the webhook keep working.
+
+Each stored value starts with the id of the key that encrypted it (`<keyId>:…`, a fingerprint of
+the derived key). To rotate the key, set `INTEGRATION_ENCRYPTION_KEY_PREVIOUS` to the old value and
+`INTEGRATION_ENCRYPTION_KEY` to the new one, and restart. The previous key is only used to read.
+Every write uses the current key, so tokens move to it as they refresh. Then run
+`node dist/src/cli/reencrypt-integration-secrets.js` (or `pnpm integrations:reencrypt` from a source
+checkout) to re-encrypt everything still on the old key, and remove the previous key. The command
+only updates values that haven't changed since it read them, so it's safe to run while the server
+runs, and again.
+
+A value that neither key decrypts marks its connection, or its API-key integration, as needing
+reconnection, with the reason, and its submissions wait until someone connects the account or
+enters the key again.
 
 ## Queue
 

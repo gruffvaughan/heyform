@@ -90,7 +90,7 @@ decrypts or refreshes them.
 | ------------------------------------------ | -------------------------------------------------------------------- | --------------------------------- |
 | `{ type: 'none' }`                         | does nothing extra.                                                  | `{ type: 'none' }`                |
 | `{ type: 'apiKey', label?, description? }` | pastes a key above the settings. At most its last 4 characters show. | `{ type: 'apiKey', apiKey }`      |
-| `{ type: 'oauth2', provider, scopes }`     | connects an account before filling in the settings.                  | `{ type: 'oauth2', accessToken }` |
+| `{ type: 'oauth2', provider, scopes }`     | picks one of the workspace's connected accounts, or connects one.    | `{ type: 'oauth2', accessToken }` |
 
 `defineApp` types `auth` in `run` from the definition, so an `oauth2` app can use
 `auth.accessToken` directly:
@@ -116,7 +116,9 @@ export default defineApp({
 ### OAuth2
 
 `provider` is the id of a provider in `oauth2-providers.ts` (only `google` so far). To add one,
-give its authorize and token URLs there, and its revoke URL (RFC 7009) if it has one. Each install registers its own OAuth app with the provider:
+give its authorize, token and OpenID Connect userinfo URLs there, the scopes that let the userinfo
+endpoint identify the account (`identityScopes`, e.g. `openid email`), and its revoke URL
+(RFC 7009) if it has one. Each install registers its own OAuth app with the provider:
 
 - set `<PROVIDER>_INTEGRATION_CLIENT_ID` and `<PROVIDER>_INTEGRATION_CLIENT_SECRET`, e.g.
   `GOOGLE_INTEGRATION_CLIENT_ID`;
@@ -124,23 +126,37 @@ give its authorize and token URLs there, and its revoke URL (RFC 7009) if it has
 
 Until both variables are set, apps using that provider are hidden.
 
-The connection belongs to the form's integration: connecting creates the integration (pending until
-its settings are saved), and deleting the integration deletes the tokens. If the provider has a
-revoke URL, the grant is revoked there first, best effort: a failed request is logged (without the
-token) and never stops the delete. Providers like Google revoke the whole grant, i.e. every token
-this server holds for that account, and HeyForm doesn't know which account a connection is for, so
-the grant is only revoked when no other connection on the server uses the same provider. Otherwise
-the account owner can remove access in their account settings. Reconnecting doesn't revoke the
-replaced tokens, since the same account's new tokens share the grant. When a job runs, HeyForm
-refreshes the access token if it has expired (there's no scheduled refresh). If the provider rejects
-the refresh token (`invalid_grant`, e.g. access was revoked), the integration is marked as needing
-reconnection and the job stops retrying. Network errors and provider outages are retried like any
-other failure.
+For Google, set the OAuth consent screen's publishing status to **In production** (it can stay
+unverified for your own users, who'll see an "unverified app" warning) or make it **Internal** if
+everyone is in your Google Workspace. In **Testing**, Google expires refresh tokens after 7 days, so
+every connection would need reconnecting weekly.
 
-While an integration needs reconnecting, its submissions wait (see [Delivery log](#delivery-log))
-and are sent once the form owner reconnects the account. A saved API key that can no longer be
-decrypted (e.g. after `FORM_ENCRYPTION_KEY` changed) is treated the same way: entering the key again
-reconnects it.
+**Connections belong to the workspace.** Connecting an account stores it once for the form's
+workspace (team), identified by the provider's account id (`sub`), with its email shown to the team.
+Connecting the same account again, from any form and by any member, updates that connection rather
+than adding another. An integration uses one of the workspace's connections, picked in its settings;
+any member can pick any connection, and the picker shows whose account it is. A connection lists the
+scopes it has granted, and an app can only use one that has granted its scopes.
+
+The workspace's settings list its connected accounts, the forms using each, and their status. The
+member who connected an account, or the workspace owner, can disconnect it. Disconnecting revokes
+the grant at the provider's revoke URL, best effort (a failure is logged without the token and never
+stops the disconnect), deletes the tokens, and leaves the integrations that used it needing
+reconnection until someone picks another account. Google revokes the whole grant, i.e. every token
+this server holds for that account, so the grant isn't revoked while another workspace on the
+server still has the same account connected. Deleting an integration doesn't touch the connection.
+
+When a job runs, HeyForm refreshes the connection's access token if it has expired (there's no
+scheduled refresh). One refresh runs at a time per connection (a Redis lock), and the others use
+its token, so integrations sharing a connection don't race. If the provider rejects the refresh
+token (`invalid_grant`, e.g. access was revoked), the connection and every active integration using
+it are marked as needing reconnection and the job stops retrying. Network errors and provider
+outages are retried like any other failure.
+
+While an integration needs reconnecting, its submissions wait (see [Delivery log](#delivery-log)).
+Reconnecting the account sends the waiting submissions of every integration that uses it. A saved
+API key that can no longer be decrypted (e.g. after `FORM_ENCRYPTION_KEY` changed) is treated the
+same way: entering the key again reconnects it.
 
 ## Queue
 

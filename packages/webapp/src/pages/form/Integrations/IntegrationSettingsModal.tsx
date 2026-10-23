@@ -4,6 +4,7 @@ import { FC, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
+  getDefaultConnectionId,
   getIntegrationAuth,
   getIntegrationAuthorizeUrl,
   getIntegrationDefaultConfig,
@@ -84,7 +85,8 @@ const SettingsForm: FC<IntegrationSettingsProps> = ({ app, connections = [], onV
         ...getIntegrationDefaultConfig(app),
         ...app.integration?.config,
         fields: app.integration?.config?.fields || [[]],
-        connectionId: app.integration?.connectionId
+        // Starts on an account, so the picker is never blank
+        connectionId: getDefaultConnectionId(app, connections)
       }}
       fetch={fetch}
       refreshDeps={[formId, app.id]}

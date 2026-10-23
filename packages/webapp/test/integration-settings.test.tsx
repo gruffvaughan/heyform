@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test } from 'vitest'
 
 import {
   getConnectionLabel,
+  getDefaultConnectionId,
   getIntegrationAuthorizeUrl,
   getIntegrationDefaultConfig,
   getIntegrationSetting,
@@ -271,6 +272,28 @@ test('picks one of the workspace accounts or connects another', async () => {
   expect(container.querySelector('label')?.textContent).toBe('Account')
   expect(container.textContent).toContain('Accounts are shared with everyone in this workspace.')
   expect(container.textContent).toContain('Connect another Example account')
+})
+
+test('starts the picker on a usable account', () => {
+  const [ann, ben, cat] = connections
+
+  // The integration's own account, while the workspace still has it
+  expect(
+    getDefaultConnectionId({ ...oauthApp, integration: { connectionId: 'c2' } } as any, connections)
+  ).toBe('c2')
+  // Otherwise the first account that works, skipping ones needing reconnection
+  expect(getDefaultConnectionId(oauthApp, [ben, ann])).toBe('c1')
+  expect(
+    getDefaultConnectionId({ ...oauthApp, integration: { connectionId: 'gone' } } as any, [
+      cat,
+      ben,
+      ann
+    ])
+  ).toBe('c1')
+  // One needing reconnection beats none; one without the app's access never
+  expect(getDefaultConnectionId(oauthApp, [cat, ben])).toBe('c2')
+  expect(getDefaultConnectionId(oauthApp, [cat])).toBeUndefined()
+  expect(getDefaultConnectionId(oauthApp, [])).toBeUndefined()
 })
 
 test('offers to retry when the accounts fail to load', async () => {

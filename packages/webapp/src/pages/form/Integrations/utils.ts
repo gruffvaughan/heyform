@@ -58,6 +58,27 @@ export function needsAccountConnection(
   return app.auth?.type === 'oauth2' && connections.length === 0
 }
 
+// The account the picker starts on: the integration's own, else the first
+// that can be used straight away, else the first that has the app's access
+export function getDefaultConnectionId(
+  app: IntegratedAppType,
+  connections: IntegrationConnectionType[] = []
+): string | undefined {
+  const current = app.integration?.connectionId
+
+  if (current && connections.some(connection => connection.id === current)) {
+    return current
+  }
+
+  const usable = connections.filter(connection => connection.hasScopes !== false)
+
+  return (
+    usable.find(
+      connection => connection.status !== INTEGRATION_CONNECTION_STATUS_ENUM.NEEDS_RECONNECT
+    )?.id ?? usable[0]?.id
+  )
+}
+
 // "<email> (connected by <name>)", and why it can't be used, if it can't
 export function getConnectionLabel(
   t: TFunction,

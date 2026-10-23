@@ -51,6 +51,9 @@ export class UpdateIntegrationSettingsResolver {
         Object.assign(updates, this.integrationAuthService.encryptApiKey(apiKey))
       } else if (!integration?.apiKey) {
         throw new BadRequestException(`${app.auth.label || 'API key'} is required`)
+      } else if (integration.status === IntegrationStatusEnum.NEEDS_RECONNECT) {
+        // The saved key can't be used; only entering it again fixes that
+        updates.status = IntegrationStatusEnum.NEEDS_RECONNECT
       }
     }
 
@@ -66,7 +69,20 @@ export class UpdateIntegrationSettingsResolver {
       }
     }
 
-    await this.integrationService.createOrUpdate(input.formId, app.id, updates)
+    const integrationId = await this.integrationService.createOrUpdate(
+      input.formId,
+      app.id,
+      updates
+    )
+
+    // e.g. a new API key: send what arrived while it needed reconnecting
+    if (updates.status === IntegrationStatusEnum.ACTIVE) {
+      await this.integrationService.resendWaiting({
+        id: integrationId,
+        formId: input.formId,
+        appId: app.id
+      })
+    }
 
     return true
   }

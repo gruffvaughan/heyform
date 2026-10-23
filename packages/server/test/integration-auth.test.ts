@@ -86,6 +86,8 @@ function createStores() {
   const integrations = new Map<string, any>()
   const oauthRecords = new Map<string, any>()
   const redis = new Map<string, string>()
+  // Integrations whose waiting submissions were resent
+  const resent: string[] = []
 
   const integrationService = {
     findById: async (id: string) => integrations.get(id) ?? null,
@@ -111,6 +113,11 @@ function createStores() {
       }
 
       return integrationService.create({ formId, appId, ...updates })
+    },
+    countWaiting: async () => 0,
+    resendWaiting: async (integration: any) => {
+      resent.push(integration.id)
+      return 0
     }
   }
 
@@ -143,7 +150,15 @@ function createStores() {
     }
   }
 
-  return { integrations, oauthRecords, redis, integrationService, thirdPartyService, redisService }
+  return {
+    integrations,
+    oauthRecords,
+    redis,
+    resent,
+    integrationService,
+    thirdPartyService,
+    redisService
+  }
 }
 
 const oauthApp: AppDefinition = defineApp({
@@ -355,7 +370,7 @@ async function testAddQueueAppliesAppOptions() {
         integrationId: 'integration_1',
         submissionId: 'submission_1'
       },
-      options: { attempts: 6, timeout: 45000 }
+      options: { attempts: 6, timeout: 45000, jobId: 'integration_1-submission_1' }
     },
     {
       data: {
@@ -364,7 +379,8 @@ async function testAddQueueAppliesAppOptions() {
         integrationId: 'integration_2',
         submissionId: 'submission_1'
       },
-      options: {}
+      // Only the job id; the queue's defaults apply
+      options: { jobId: 'integration_2-submission_1' }
     }
   ])
 }
@@ -437,7 +453,8 @@ async function testApiKeyIsStoredEncryptedAndNeverReturned() {
     config: { list: 'a' },
     status: IntegrationStatusEnum.ACTIVE,
     connected: false,
-    apiKeyHint: '••••WXYZ'
+    apiKeyHint: '••••WXYZ',
+    waitingCount: 0
   })
   assert.ok(!JSON.stringify(listed).includes(integration.apiKey), 'ciphertext not returned')
 
@@ -468,10 +485,48 @@ async function testMissingApiKeyFailsWithoutRetry() {
     service.getRunAuth(apiKeyApp, { id: 'i', apiKey: undefined }),
     (error: any) => error instanceof IntegrationAuthError && !error.needsReconnect
   )
+}
+
+async function testUnreadableApiKeyNeedsANewKey() {
+  const ctx = createAuth()
+  const resolver = createSettingsResolver(ctx)
+  const integrationId = await ctx.integrationService.create({
+    formId: 'form_1',
+    appId: 'keyapp',
+    config: { list: 'a' },
+    status: IntegrationStatusEnum.ACTIVE,
+    // Encrypted with a FORM_ENCRYPTION_KEY that has since changed
+    apiKey: encryptSecret('k', 'other-key'),
+    apiKeyHint: '••••'
+  })
+
   await assert.rejects(
-    service.getRunAuth(apiKeyApp, { id: 'i', apiKey: encryptSecret('k', 'other-key') }),
-    (error: any) => error instanceof IntegrationAuthError && /enter it again/.test(error.message)
+    ctx.service.getRunAuth(apiKeyApp, ctx.integrations.get(integrationId)),
+    (error: any) =>
+      error instanceof IntegrationAuthError &&
+      error.needsReconnect &&
+      /Enter it again/.test(error.message)
   )
+  assert.strictEqual(ctx.integrations.get(integrationId).status, NEEDS_RECONNECT)
+
+  // Saving without a key leaves the unreadable one, so it still needs one
+  await resolver.updateIntegrationSettings({
+    formId: 'form_1',
+    appId: 'keyapp',
+    config: { list: 'b' }
+  })
+  assert.strictEqual(ctx.integrations.get(integrationId).status, NEEDS_RECONNECT)
+  assert.deepStrictEqual(ctx.resent, [])
+
+  // A new key reconnects it and sends what waited
+  await resolver.updateIntegrationSettings({
+    formId: 'form_1',
+    appId: 'keyapp',
+    config: { list: 'b' },
+    apiKey: 'test-api-key-0123456789-NEW1'
+  })
+  assert.strictEqual(ctx.integrations.get(integrationId).status, IntegrationStatusEnum.ACTIVE)
+  assert.deepStrictEqual(ctx.resent, [integrationId])
 }
 
 // --- OAuth2 connect ---------------------------------------------------------
@@ -557,6 +612,7 @@ async function testCompleteAuthorizationStoresEncryptedTokens() {
 
   const [integration] = ctx.integrations.values()
   assert.strictEqual(integration.status, IntegrationStatusEnum.PENDING, 'not active until saved')
+  assert.deepStrictEqual(ctx.resent, [], 'nothing to send until it is active')
   assert.ok(integration.thirdPartyOauthId)
 
   const record = ctx.oauthRecords.get(integration.thirdPartyOauthId)
@@ -608,6 +664,7 @@ async function testReconnectRestoresStatusAndKeepsRefreshToken() {
 
   const integration = ctx.integrations.get(integrationId)
   assert.strictEqual(integration.status, IntegrationStatusEnum.ACTIVE)
+  assert.deepStrictEqual(ctx.resent, [integrationId], 'waiting submissions are sent')
   assert.ok(!ctx.oauthRecords.has(oauthId), 'the replaced connection is deleted')
 
   const tokens = storedTokens(ctx, integration.thirdPartyOauthId)
@@ -674,6 +731,25 @@ async function testDeletingTheIntegrationDropsItsTokens() {
 
   assert.deepStrictEqual(deleted, ['form_1/fakeapp'])
   assert.strictEqual(ctx.oauthRecords.has(oauthId), false)
+}
+
+async function testTurningOnResendsWaitingSubmissions() {
+  const ctx = createAuth()
+  const { integrationId } = await connect(
+    ctx,
+    { accessToken: 'a', refreshToken: 'r' },
+    { status: IntegrationStatusEnum.DISABLED }
+  )
+  const resolver = new UpdateIntegrationStatusResolver(ctx.integrationService)
+  const setStatus = (status: number) =>
+    resolver.updateIntegrationStatus({ formId: 'form_1', appId: 'fakeapp', status })
+
+  await setStatus(IntegrationStatusEnum.DISABLED)
+  assert.deepStrictEqual(ctx.resent, [])
+
+  // e.g. turned off while it needed reconnecting, then reconnected
+  await setStatus(IntegrationStatusEnum.ACTIVE)
+  assert.deepStrictEqual(ctx.resent, [integrationId])
 }
 
 // --- refresh on use ---------------------------------------------------------
@@ -1075,6 +1151,7 @@ async function run() {
     await testApiKeyIsStoredEncryptedAndNeverReturned()
     testMaskApiKey()
     await testMissingApiKeyFailsWithoutRetry()
+    await testUnreadableApiKeyNeedsANewKey()
     await testAuthorizeUrlAndState()
     await testStateIsBoundToUserAndSingleUse()
     await testCompleteAuthorizationStoresEncryptedTokens()
@@ -1082,6 +1159,7 @@ async function run() {
     await testReconnectRestoresStatusAndKeepsRefreshToken()
     await testSettingsNeedAConnectedAccount()
     await testDeletingTheIntegrationDropsItsTokens()
+    await testTurningOnResendsWaitingSubmissions()
     await testValidTokenIsUsedWithoutRefresh()
     await testExpiredTokenIsRefreshed()
     await testRevokedGrantMarksNeedsReconnect()

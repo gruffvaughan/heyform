@@ -98,6 +98,22 @@ export class IntegrationQueue extends BaseQueue {
   async recordFailure(job: Job<IntegrationQueueJob>, error: Error) {
     const maxAttempts = job.opts.attempts || 1
 
+    // Not a spent delivery: it's sent again once the account is reconnected
+    if (error instanceof IntegrationAuthError && error.needsReconnect) {
+      try {
+        await this.integrationService.holdForReconnect({
+          ...job.data,
+          attempt: job.attemptsMade,
+          maxAttempts,
+          error: error.message
+        })
+      } catch (err: any) {
+        this.logger.error(`Couldn't keep ${job.queue?.name}#${job.id} waiting: ${err?.message}`)
+      }
+
+      return
+    }
+
     // attemptsMade already includes this attempt
     await this.record(job, IntegrationRecordStatusEnum.FAILED, job.attemptsMade, {
       willRetry: !(error instanceof IntegrationAuthError) && job.attemptsMade < maxAttempts,

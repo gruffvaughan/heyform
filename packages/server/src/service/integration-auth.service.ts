@@ -245,6 +245,11 @@ export class IntegrationAuthService {
     }
 
     await this.integrationService.update(integrationId, updates)
+
+    // Send what arrived while the account needed reconnecting
+    if (integration && (updates.status ?? integration.status) === IntegrationStatusEnum.ACTIVE) {
+      await this.integrationService.resendWaiting(integration)
+    }
   }
 
   async disconnect(integration: IntegrationModel): Promise<void> {
@@ -262,7 +267,7 @@ export class IntegrationAuthService {
   async getRunAuth(app: AppDefinition, integration: IntegrationModel): Promise<AppRunAuth> {
     switch (app.auth.type) {
       case 'apiKey':
-        return { type: 'apiKey', apiKey: this.readApiKey(integration) }
+        return { type: 'apiKey', apiKey: await this.readApiKey(integration) }
 
       case 'oauth2':
         return { type: 'oauth2', accessToken: await this.getAccessToken(app, integration) }
@@ -272,7 +277,7 @@ export class IntegrationAuthService {
     }
   }
 
-  private readApiKey(integration: IntegrationModel): string {
+  private async readApiKey(integration: IntegrationModel): Promise<string> {
     if (!integration.apiKey) {
       throw new IntegrationAuthError('No API key is saved for this integration')
     }
@@ -280,7 +285,13 @@ export class IntegrationAuthService {
     try {
       return decryptSecret(integration.apiKey, FORM_ENCRYPTION_KEY)
     } catch (_) {
-      throw new IntegrationAuthError('The saved API key cannot be read; enter it again')
+      // e.g. FORM_ENCRYPTION_KEY changed. Like unreadable OAuth2 tokens, the
+      // form owner has to enter it again; submissions wait until then.
+      return this.needsReconnect(
+        integration,
+        'The saved API key cannot be read',
+        'Enter it again to resume deliveries.'
+      )
     }
   }
 
@@ -357,13 +368,17 @@ export class IntegrationAuthService {
     return refreshed.accessToken!
   }
 
-  private async needsReconnect(integration: IntegrationModel, reason: string): Promise<never> {
+  private async needsReconnect(
+    integration: IntegrationModel,
+    reason: string,
+    action = 'Reconnect the account to resume deliveries.'
+  ): Promise<never> {
     await this.integrationService.update(integration.id, {
       status: IntegrationStatusEnum.NEEDS_RECONNECT
     })
     this.logger.warn(`Integration ${integration.id} needs reconnecting: ${reason}`)
 
-    throw new IntegrationAuthError(`${reason}. Reconnect the account to resume deliveries.`, true)
+    throw new IntegrationAuthError(`${reason}. ${action}`, true)
   }
 
   // --- Tokens -----------------------------------------------------------------

@@ -14,13 +14,16 @@ export class FormIntegrationsResolver {
     const integrations = await this.integrationService.findAllInForm(input.formId)
 
     // Pick fields explicitly so stored credentials can't reach the client
-    return integrations.map(integration => ({
-      formId: integration.formId,
-      appId: integration.appId,
-      config: integration.config,
-      status: integration.status,
-      connected: !!integration.thirdPartyOauthId,
-      apiKeyHint: integration.apiKeyHint
-    }))
+    return Promise.all(
+      integrations.map(async integration => ({
+        formId: integration.formId,
+        appId: integration.appId,
+        config: integration.config,
+        status: integration.status,
+        connected: !!integration.thirdPartyOauthId,
+        apiKeyHint: integration.apiKeyHint,
+        waitingCount: await this.integrationService.countWaiting(integration.id)
+      }))
+    )
   }
 }

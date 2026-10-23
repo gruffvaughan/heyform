@@ -49,6 +49,8 @@ export interface IntegrationType {
   connected?: boolean
   // Masked end of the saved API key
   apiKeyHint?: string
+  // Submissions waiting for the integration to be reconnected
+  waitingCount?: number
 }
 
 // One delivery attempt of a submission to an integration

@@ -763,6 +763,7 @@ export const FORM_INTEGRATIONS_GQL = gql`
       status
       connected
       apiKeyHint
+      waitingCount
     }
   }
 `

@@ -300,6 +300,11 @@ function testEncryptSecret() {
   data[0] ^= 1
   parts[3] = data.toString('base64')
   assert.throws(() => decryptSecret(parts.join('.'), 'key'), 'tampering is detected')
+
+  // A truncated tag is rejected rather than checked with fewer bits
+  const truncated = first.split('.')
+  truncated[2] = Buffer.from(truncated[2], 'base64').subarray(0, 4).toString('base64')
+  assert.throws(() => decryptSecret(truncated.join('.'), 'key'), /Invalid encrypted secret/)
 }
 
 // --- queue options ----------------------------------------------------------
@@ -399,7 +404,7 @@ function createSettingsResolver(ctx: ReturnType<typeof createAuth>) {
 async function testApiKeyIsStoredEncryptedAndNeverReturned() {
   const ctx = createAuth()
   const resolver = createSettingsResolver(ctx)
-  const apiKey = 'sk_live_0123456789abcdefWXYZ'
+  const apiKey = 'test-api-key-0123456789-WXYZ'
 
   await assertBadRequest(
     resolver.updateIntegrationSettings({
@@ -569,6 +574,24 @@ async function testCompleteAuthorizationStoresEncryptedTokens() {
   })
   assert.strictEqual(listed.connected, true)
   assert.ok(!JSON.stringify(listed).includes(integration.thirdPartyOauthId))
+}
+
+async function testRejectsExpiringTokenWithoutRefreshToken() {
+  const ctx = createAuth()
+  provider.handler = () => ({ status: 200, body: { access_token: 'a', expires_in: 3600 } })
+
+  await assert.rejects(
+    ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-1'),
+    (error: any) =>
+      error instanceof OAuth2TokenError && /did not return a refresh token/.test(error.message)
+  )
+  assert.strictEqual(ctx.integrations.size, 0, 'no pending integration is left behind')
+  assert.strictEqual(ctx.oauthRecords.size, 0)
+
+  // A token that doesn't expire needs no refresh token
+  provider.handler = () => ({ status: 200, body: { access_token: 'a' } })
+  await ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-2')
+  assert.strictEqual(ctx.integrations.size, 1)
 }
 
 async function testReconnectRestoresStatusAndKeepsRefreshToken() {
@@ -1054,6 +1077,7 @@ async function run() {
     await testAuthorizeUrlAndState()
     await testStateIsBoundToUserAndSingleUse()
     await testCompleteAuthorizationStoresEncryptedTokens()
+    await testRejectsExpiringTokenWithoutRefreshToken()
     await testReconnectRestoresStatusAndKeepsRefreshToken()
     await testSettingsNeedAConnectedAccount()
     await testDeletingTheIntegrationDropsItsTokens()

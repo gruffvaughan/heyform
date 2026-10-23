@@ -107,6 +107,7 @@ export function aesDecryptObject(
 }
 
 const SECRET_VERSION = 'v1'
+const SECRET_TAG_LENGTH = 16
 const SECRET_KEY_INFO = 'heyform:stored-secret'
 
 function storedSecretKey(secret: string): Buffer {
@@ -125,7 +126,9 @@ function storedSecretKey(secret: string): Buffer {
  */
 export function encryptSecret(plaintext: string, secret: string): string {
   const iv = crypto.randomBytes(12)
-  const cipher = crypto.createCipheriv('aes-256-gcm', storedSecretKey(secret), iv)
+  const cipher = crypto.createCipheriv('aes-256-gcm', storedSecretKey(secret), iv, {
+    authTagLength: SECRET_TAG_LENGTH
+  })
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
 
   return [
@@ -144,12 +147,20 @@ export function decryptSecret(value: string, secret: string): string {
     throw new Error('Invalid encrypted secret')
   }
 
+  const authTag = Buffer.from(tag, 'base64')
+
+  // A shorter tag would be easier to forge
+  if (authTag.length !== SECRET_TAG_LENGTH) {
+    throw new Error('Invalid encrypted secret')
+  }
+
   const decipher = crypto.createDecipheriv(
     'aes-256-gcm',
     storedSecretKey(secret),
-    Buffer.from(iv, 'base64')
+    Buffer.from(iv, 'base64'),
+    { authTagLength: SECRET_TAG_LENGTH }
   )
-  decipher.setAuthTag(Buffer.from(tag, 'base64'))
+  decipher.setAuthTag(authTag)
 
   return Buffer.concat([
     decipher.update(Buffer.from(encrypted, 'base64')),

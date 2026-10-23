@@ -202,6 +202,17 @@ export class IntegrationAuthService {
     })
 
     const integration = await this.integrationService.findOne(formId, app.id)
+    const previous = integration?.thirdPartyOauthId
+      ? await this.thirdPartyService.findById(integration.thirdPartyOauthId)
+      : null
+    const tokens = this.toStoredTokens(response, previous ? this.readTokens(previous) : undefined)
+
+    // An expiring token that can't be refreshed would look connected, then
+    // stop working within the hour
+    if (tokens.expiresAt && !tokens.refreshToken) {
+      throw new OAuth2TokenError(`${provider.name} did not return a refresh token`)
+    }
+
     const integrationId =
       integration?.id ??
       (await this.integrationService.create({
@@ -210,10 +221,6 @@ export class IntegrationAuthService {
         config: {},
         status: IntegrationStatusEnum.PENDING
       }))
-    const previous = integration?.thirdPartyOauthId
-      ? await this.thirdPartyService.findById(integration.thirdPartyOauthId)
-      : null
-    const tokens = this.toStoredTokens(response, previous ? this.readTokens(previous) : undefined)
     const scope = app.auth.type === 'oauth2' ? app.auth.scopes.join(' ') : ''
 
     // One connection per integration, so deleting the integration or another

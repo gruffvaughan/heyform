@@ -5,7 +5,8 @@ from `./types`. The definition drives both sides:
 
 - the webapp renders the app's settings form from `settings`, with no app-specific UI;
 - the server validates saved settings against `settings`, then calls the app's `validate` hook;
-- the integration queue calls `run` for every new submission while the integration is active.
+- the integration queue calls `run` for every new submission while the integration is active,
+  with credentials for the app's `auth`.
 
 ## Adding an app
 
@@ -53,10 +54,11 @@ export default defineApp({
 | `name`        | Display name.                                                                                                  |
 | `description` | One sentence shown in the integrations list and settings modal.                                                |
 | `icon`        | Path of the logo served by the server, e.g. `/static/webhook.png`.                                             |
-| `auth`        | How HeyForm authenticates with the app. Defaults to `{ type: 'none' }`, the only type supported so far.        |
+| `auth`        | How HeyForm authenticates with the app's service: `none` (default), `apiKey` or `oauth2`. See below.           |
 | `settings`    | Fields the form owner fills in. See below.                                                                     |
+| `queue`       | Optional retry and timeout options for the app's delivery jobs. See below.                                     |
 | `validate`    | Optional. Receives the config after the generic checks; throw a `BadRequestException` to reject it.            |
-| `run`         | Receives `{ config, submission, form }` for each submission. Throwing fails the queue job, which Bull retries. |
+| `run`         | Receives `{ config, submission, form, auth }` for each submission. Throwing fails the job, which Bull retries. |
 
 ## Settings
 
@@ -78,6 +80,74 @@ When settings are saved, the server:
 3. drops any key that isn't a declared setting;
 4. calls the app's `validate` with the cleaned config, then stores that config.
 
+## Auth
+
+HeyForm stores the credentials, encrypted with `FORM_ENCRYPTION_KEY`, and passes `run` a
+ready-to-use `auth` value. Credentials are never sent to the browser, and app code never stores,
+decrypts or refreshes them.
+
+| `auth`                                     | The form owner                                                       | `run` receives                    |
+| ------------------------------------------ | -------------------------------------------------------------------- | --------------------------------- |
+| `{ type: 'none' }`                         | does nothing extra.                                                  | `{ type: 'none' }`                |
+| `{ type: 'apiKey', label?, description? }` | pastes a key above the settings. At most its last 4 characters show. | `{ type: 'apiKey', apiKey }`      |
+| `{ type: 'oauth2', provider, scopes }`     | connects an account before filling in the settings.                  | `{ type: 'oauth2', accessToken }` |
+
+`defineApp` types `auth` in `run` from the definition, so an `oauth2` app can use
+`auth.accessToken` directly:
+
+```ts
+export default defineApp({
+  id: 'example',
+  // ...
+  auth: {
+    type: 'oauth2',
+    provider: 'google',
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  },
+  run: async ({ auth, config, submission }) => {
+    await got.post('https://api.example.com/rows', {
+      headers: { authorization: `Bearer ${auth.accessToken}` },
+      json: { submissionId: submission.id, sheet: config.sheet }
+    })
+  }
+})
+```
+
+### OAuth2
+
+`provider` is the id of a provider in `oauth2-providers.ts` (only `google` so far). To add one,
+give its authorize and token URLs there. Each install registers its own OAuth app with the provider:
+
+- set `<PROVIDER>_INTEGRATION_CLIENT_ID` and `<PROVIDER>_INTEGRATION_CLIENT_SECRET`, e.g.
+  `GOOGLE_INTEGRATION_CLIENT_ID`;
+- register `${APP_HOMEPAGE_URL}/api/integrations/oauth/callback` as the redirect URI.
+
+Until both variables are set, apps using that provider are hidden.
+
+The connection belongs to the form's integration: connecting creates the integration (pending until
+its settings are saved), and deleting the integration deletes the tokens. When a job runs, HeyForm
+refreshes the access token if it has expired (there's no scheduled refresh). If the provider rejects
+the refresh token (`invalid_grant`, e.g. access was revoked), the integration is marked as needing
+reconnection and the job stops retrying. New submissions aren't sent to the app until the form
+owner reconnects the account. Network errors and provider outages are retried like any other
+failure.
+
+## Queue
+
+Each submission becomes one job on the integration queue, which retries failures with the global
+`BULL_JOB_ATTEMPTS`, `BULL_JOB_BACKOFF_*` and `BULL_JOB_TIMEOUT` settings. An app can override them:
+
+```ts
+queue: {
+  attempts: 5, // total tries, including the first
+  backoff: { type: 'exponential', delay: 2000 }, // or a fixed delay in ms
+  timeout: 30_000 // ms per try
+}
+```
+
+Credential errors that a retry can't fix (no API key saved, a revoked OAuth grant) fail the job
+without further attempts.
+
 ## Translations
 
 The webapp looks labels up under `form.integrations.apps.<id>` and falls back to the English in the
@@ -86,6 +156,7 @@ definition, so translations are optional:
 ```json
 {
   "description": "...",
+  "auth": { "label": "...", "description": "..." },
   "settings": {
     "<name>": {
       "label": "...",

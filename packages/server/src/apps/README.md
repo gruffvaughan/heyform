@@ -116,7 +116,7 @@ export default defineApp({
 ### OAuth2
 
 `provider` is the id of a provider in `oauth2-providers.ts` (only `google` so far). To add one,
-give its authorize and token URLs there. Each install registers its own OAuth app with the provider:
+give its authorize and token URLs there, and its revoke URL (RFC 7009) if it has one. Each install registers its own OAuth app with the provider:
 
 - set `<PROVIDER>_INTEGRATION_CLIENT_ID` and `<PROVIDER>_INTEGRATION_CLIENT_SECRET`, e.g.
   `GOOGLE_INTEGRATION_CLIENT_ID`;
@@ -125,7 +125,13 @@ give its authorize and token URLs there. Each install registers its own OAuth ap
 Until both variables are set, apps using that provider are hidden.
 
 The connection belongs to the form's integration: connecting creates the integration (pending until
-its settings are saved), and deleting the integration deletes the tokens. When a job runs, HeyForm
+its settings are saved), and deleting the integration deletes the tokens. If the provider has a
+revoke URL, the grant is revoked there first, best effort: a failed request is logged (without the
+token) and never stops the delete. Providers like Google revoke the whole grant, i.e. every token
+this server holds for that account, and HeyForm doesn't know which account a connection is for, so
+the grant is only revoked when no other connection on the server uses the same provider. Otherwise
+the account owner can remove access in their account settings. Reconnecting doesn't revoke the
+replaced tokens, since the same account's new tokens share the grant. When a job runs, HeyForm
 refreshes the access token if it has expired (there's no scheduled refresh). If the provider rejects
 the refresh token (`invalid_grant`, e.g. access was revoked), the integration is marked as needing
 reconnection and the job stops retrying. New submissions aren't sent to the app until the form

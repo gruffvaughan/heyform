@@ -18,7 +18,8 @@ const tests = [
   'export-file.service.test.ts',
   'form-report.service.test.ts',
   'webhook.test.ts',
-  'app-config.test.ts'
+  'app-config.test.ts',
+  'integration-auth.test.ts'
 ]
 const serverRoot = path.resolve(__dirname, '..')
 

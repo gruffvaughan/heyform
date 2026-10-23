@@ -82,14 +82,15 @@ export class IntegrationService {
     })
   }
 
-  static async updateSettings(formId: string, appId: string, config: AnyMap) {
+  static async updateSettings(formId: string, appId: string, config: AnyMap, apiKey?: string) {
     return apollo.mutate({
       mutation: UPDATE_INTEGRATION_SETTINGS_GQL,
       variables: {
         input: {
           formId,
           appId,
-          config
+          config,
+          apiKey
         }
       }
     })

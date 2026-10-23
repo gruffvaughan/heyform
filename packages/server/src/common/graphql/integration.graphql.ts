@@ -1,4 +1,4 @@
-import { IsEnum } from 'class-validator'
+import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator'
 
 import { FormDetailInput } from './form.graphql'
 import { IntegrationStatusEnum } from '@model'
@@ -21,6 +21,13 @@ export class IntegrationOAuthInput extends IntegrationInput {
 export class UpdateIntegrationInput extends IntegrationInput {
   @Field(type => GraphQLJSONObject)
   config: Record<string, any>
+
+  // For apps with `auth.type === 'apiKey'`. Omit to keep the saved key.
+  @Field({ nullable: true })
+  @IsOptional()
+  @IsString()
+  @MaxLength(4096)
+  apiKey?: string
 }
 
 @InputType()

@@ -3,18 +3,23 @@ import { FC, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
+  getIntegrationAuth,
+  getIntegrationAuthorizeUrl,
   getIntegrationDefaultConfig,
   getIntegrationDescription,
-  getIntegrationSetting
+  getIntegrationSetting,
+  needsAccountConnection
 } from './utils'
-import { IntegrationService } from '@/services'
+import { FormService, IntegrationService } from '@/services'
 import { useParam } from '@/utils'
 
 import IconLogo from '@/assets/logo.svg?react'
-import { Form, Image, Modal } from '@/components'
+import { Button, Form, Image, Modal } from '@/components'
+import { INTEGRATION_STATUS_ENUM } from '@/consts'
 import { useAppStore, useFormStore, useModal } from '@/store'
 import { IntegratedAppType } from '@/types'
 
+import { ApiKeyItem, ConnectAccount } from './IntegrationAuthItem'
 import IntegrationSettingsItem from './IntegrationSettingsItem'
 
 export interface IntegrationSettingsProps {
@@ -27,14 +32,26 @@ const SettingsForm: FC<IntegrationSettingsProps> = ({ app, onValuesChange }) => 
 
   const { formId } = useParam()
   const { closeModal } = useAppStore()
-  const { updateIntegration } = useFormStore()
+  const { updateIntegration, setIntegrations } = useFormStore()
 
-  async function fetch(values: AnyMap) {
-    await IntegrationService.updateSettings(formId, app.id, values)
+  async function fetch({ apiKey, ...config }: AnyMap) {
+    await IntegrationService.updateSettings(formId, app.id, config, apiKey || undefined)
 
     updateIntegration(app.id, {
-      config: values
+      config,
+      // Saving activates the integration, as on the server, unless the
+      // account still needs reconnecting
+      status:
+        app.integration?.status === INTEGRATION_STATUS_ENUM.NEEDS_RECONNECT
+          ? INTEGRATION_STATUS_ENUM.NEEDS_RECONNECT
+          : INTEGRATION_STATUS_ENUM.ACTIVE
     })
+
+    // Pick up the masked hint of the new key
+    if (apiKey) {
+      setIntegrations(await FormService.integrations(formId))
+    }
+
     closeModal('IntegrationSettingsModal')
   }
 
@@ -55,6 +72,8 @@ const SettingsForm: FC<IntegrationSettingsProps> = ({ app, onValuesChange }) => 
       submitOnChangedOnly
       onValuesChange={onValuesChange}
     >
+      {app.auth?.type === 'apiKey' && <ApiKeyItem app={app} />}
+
       {app.settings?.map(setting => (
         <IntegrationSettingsItem
           key={setting.name}
@@ -67,7 +86,9 @@ const SettingsForm: FC<IntegrationSettingsProps> = ({ app, onValuesChange }) => 
 
 const Settings: FC<{ app: IntegratedAppType }> = ({ app }) => {
   const { t } = useTranslation()
+  const { formId } = useParam()
   const [hasIconError, setHasIconError] = useState(false)
+  const { providerName } = getIntegrationAuth(t, app)
 
   return (
     <div>
@@ -103,7 +124,24 @@ const Settings: FC<{ app: IntegratedAppType }> = ({ app }) => {
       </div>
 
       <div className="mt-12">
-        <SettingsForm app={app} />
+        {needsAccountConnection(app) ? (
+          <ConnectAccount app={app} formId={formId} />
+        ) : (
+          <>
+            <SettingsForm app={app} />
+
+            {app.auth?.type === 'oauth2' && (
+              <div className="mt-4 text-center">
+                <Button.Link
+                  size="sm"
+                  onClick={() => window.location.assign(getIntegrationAuthorizeUrl(formId, app.id))}
+                >
+                  {t('form.integrations.auth.reconnectAccount', { name: providerName })}
+                </Button.Link>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   )

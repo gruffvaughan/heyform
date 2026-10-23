@@ -4,7 +4,10 @@ import { Document } from 'mongoose'
 export enum IntegrationStatusEnum {
   PENDING = 0,
   ACTIVE = 1,
-  DISABLED = 2
+  DISABLED = 2,
+  // The app's OAuth2 grant was revoked or expired; the form owner has to
+  // connect the account again before deliveries resume
+  NEEDS_RECONNECT = 3
 }
 
 @Schema({
@@ -20,8 +23,17 @@ export class IntegrationModel extends Document {
   @Prop({ type: Map, default: {} })
   config?: Record<string, any>
 
+  // Connected OAuth2 account, for apps with `auth.type === 'oauth2'`
   @Prop()
   thirdPartyOauthId?: string
+
+  // Encrypted with encryptSecret(), for apps with `auth.type === 'apiKey'`.
+  // Never returned to the client; apiKeyHint is shown instead.
+  @Prop()
+  apiKey?: string
+
+  @Prop()
+  apiKeyHint?: string
 
   @Prop({
     type: Number,

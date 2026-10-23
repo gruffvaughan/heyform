@@ -4,12 +4,15 @@ import { type Root, createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test } from 'vitest'
 
 import {
+  getIntegrationAuthorizeUrl,
   getIntegrationDefaultConfig,
-  getIntegrationSetting
+  getIntegrationSetting,
+  needsAccountConnection
 } from '../src/pages/form/Integrations/utils'
 
 import { Form } from '../src/components'
 import i18n from '../src/i18n'
+import { ApiKeyItem, ConnectAccount } from '../src/pages/form/Integrations/IntegrationAuthItem'
 import IntegrationSettingsItem from '../src/pages/form/Integrations/IntegrationSettingsItem'
 import type { AppSettingType, IntegratedAppType } from '../src/types/form'
 
@@ -125,4 +128,88 @@ test('collects default values for a new integration', () => {
     format: 'json',
     enabled: false
   })
+})
+
+// --- auth -------------------------------------------------------------------
+
+const apiKeyApp = {
+  id: 'keyapp',
+  name: 'Key App',
+  auth: { type: 'apiKey', label: 'Secret token', description: 'Find it under Settings.' },
+  settings: [],
+  integration: { appId: 'keyapp', status: 1 }
+} as unknown as IntegratedAppType
+
+const oauthApp = {
+  id: 'sheets',
+  name: 'Sheets',
+  auth: { type: 'oauth2', provider: 'google', providerName: 'Google' },
+  settings: [],
+  integration: undefined
+} as unknown as IntegratedAppType
+
+async function renderNode(node: React.ReactNode) {
+  await act(async () => root.render(<Form>{node}</Form>))
+}
+
+test('renders the API key as a required password input', async () => {
+  await renderNode(<ApiKeyItem app={apiKeyApp} />)
+
+  const input = container.querySelector('input')
+  expect(input?.type).toBe('password')
+  expect(input?.value).toBe('')
+  expect(container.querySelector('label')?.textContent).toBe('Secret token')
+  expect(container.textContent).toContain('Find it under Settings.')
+  expect(container.textContent).not.toContain('A key is saved')
+})
+
+test('shows only the masked hint of a saved API key', async () => {
+  await renderNode(
+    <ApiKeyItem
+      app={{
+        ...apiKeyApp,
+        auth: { type: 'apiKey' },
+        integration: { appId: 'keyapp', status: 1, apiKeyHint: '••••WXYZ' }
+      }}
+    />
+  )
+
+  const input = container.querySelector('input')
+  expect(container.querySelector('label')?.textContent).toBe('API key')
+  expect(input?.value).toBe('')
+  expect(input?.placeholder).toBe('••••WXYZ')
+  expect(container.textContent).toContain('A key is saved (••••WXYZ). Leave this blank to keep it.')
+})
+
+test('asks to connect an OAuth2 account before the settings', async () => {
+  expect(needsAccountConnection(oauthApp)).toBe(true)
+  expect(
+    needsAccountConnection({
+      ...oauthApp,
+      integration: { appId: 'sheets', status: 0, connected: true }
+    })
+  ).toBe(false)
+  expect(needsAccountConnection(apiKeyApp)).toBe(false)
+
+  await act(async () => root.render(<ConnectAccount app={oauthApp} formId="form_1" />))
+  expect(container.querySelector('button')?.textContent).toBe('Connect Google account')
+})
+
+test('asks to reconnect when the connection stopped working', async () => {
+  const app = {
+    ...oauthApp,
+    integration: { appId: 'sheets', status: 3, connected: true, config: { sheet: 'a' } }
+  }
+
+  expect(needsAccountConnection(app)).toBe(true)
+
+  await act(async () => root.render(<ConnectAccount app={app} formId="form_1" />))
+  expect(container.querySelector('button')?.textContent).toBe('Reconnect Google account')
+  expect(container.textContent).toContain('Deliveries are paused')
+})
+
+test('builds the authorize URL for the form and app', () => {
+  expect(getIntegrationAuthorizeUrl('form 1', 'sheets')).toBe(
+    '/api/integrations/oauth/authorize?formId=form+1&appId=sheets'
+  )
 })

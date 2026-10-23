@@ -761,6 +761,8 @@ export const FORM_INTEGRATIONS_GQL = gql`
       appId
       config
       status
+      connected
+      apiKeyHint
     }
   }
 `
@@ -821,6 +823,13 @@ export const APPS_GQL = gql`
       name
       description
       icon
+      auth {
+        type
+        provider
+        providerName
+        label
+        description
+      }
       settings {
         type
         name
@@ -1087,7 +1096,7 @@ export const UPDATE_INTEGRATION_STATUS_GQL = gql`
 `
 
 export const DELETE_INTEGRATION_SETTINGS_GQL = gql`
-  mutation deleteIntegrationSettings($input: ThirdPartyInput!) {
+  mutation deleteIntegrationSettings($input: IntegrationInput!) {
     deleteIntegrationSettings(input: $input)
   }
 `

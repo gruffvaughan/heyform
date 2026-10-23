@@ -107,3 +107,17 @@ export function ConnectionItem({
     </Form.Item>
   )
 }
+
+// The workspace's accounts couldn't be loaded, e.g. a network error
+export function ConnectionsLoadFailed({ onRetry }: { onRetry: () => void }) {
+  const { t } = useTranslation()
+
+  return (
+    <div className="text-center text-sm">
+      <p className="text-error">{t('form.integrations.auth.accountsFailed')}</p>
+      <Button.Link size="sm" onClick={onRetry}>
+        {t('components.error.retry')}
+      </Button.Link>
+    </div>
+  )
+}

@@ -20,7 +20,12 @@ import { INTEGRATION_CONNECTION_STATUS_ENUM, INTEGRATION_STATUS_ENUM } from '@/c
 import { useAppStore, useFormStore, useModal } from '@/store'
 import { IntegratedAppType, IntegrationConnectionType } from '@/types'
 
-import { ApiKeyItem, ConnectAccount, ConnectionItem } from './IntegrationAuthItem'
+import {
+  ApiKeyItem,
+  ConnectAccount,
+  ConnectionItem,
+  ConnectionsLoadFailed
+} from './IntegrationAuthItem'
 import IntegrationRecords from './IntegrationRecords'
 import IntegrationSettingsItem from './IntegrationSettingsItem'
 
@@ -114,7 +119,12 @@ const Settings: FC<{ app: IntegratedAppType }> = ({ app }) => {
   const isOAuth2 = app.auth?.type === 'oauth2'
 
   // Any account the workspace has connected can be picked
-  const { data: connections } = useRequest(
+  const {
+    data: connections,
+    error: connectionsError,
+    loading: connectionsLoading,
+    refresh: refreshConnections
+  } = useRequest(
     async (): Promise<IntegrationConnectionType[]> =>
       isOAuth2 ? IntegrationService.connections(formId, app.id) : [],
     { refreshDeps: [formId, app.id] }
@@ -154,7 +164,11 @@ const Settings: FC<{ app: IntegratedAppType }> = ({ app }) => {
       </div>
 
       <div className="mt-12">
-        {isOAuth2 && !connections ? null : needsAccountConnection(app, connections) ? (
+        {isOAuth2 && !connections ? (
+          connectionsError && !connectionsLoading ? (
+            <ConnectionsLoadFailed onRetry={refreshConnections} />
+          ) : null
+        ) : needsAccountConnection(app, connections) ? (
           <ConnectAccount app={app} formId={formId} />
         ) : (
           <>

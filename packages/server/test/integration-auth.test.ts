@@ -1,0 +1,1082 @@
+import * as assert from 'assert'
+import * as crypto from 'crypto'
+import * as http from 'http'
+import { AddressInfo } from 'net'
+
+import type { AppDefinition } from '../src/apps/types'
+
+// Set before the server modules read them
+process.env.FORM_ENCRYPTION_KEY = 'integration-auth-test-key'
+process.env.APP_HOMEPAGE_URL = 'https://heyform.example.com'
+process.env.FAKE_INTEGRATION_CLIENT_ID = 'fake-client-id'
+process.env.FAKE_INTEGRATION_CLIENT_SECRET = 'fake-client-secret'
+
+const { BadRequestException } = require('@nestjs/common')
+const { defineApp } = require('../src/apps/types')
+const { AppService } = require('../src/service/app.service')
+const { IntegrationService, getAppJobOptions } = require('../src/service/integration.service')
+const {
+  IntegrationAuthError,
+  IntegrationAuthService,
+  OAuth2TokenError,
+  maskApiKey
+} = require('../src/service/integration-auth.service')
+const { IntegrationQueue } = require('../src/queue/integration-queue')
+const { AppsResolver } = require('../src/resolver/apps/apps.resolver')
+const { FormIntegrationsResolver } = require('../src/resolver/form/form-integrations.resolver')
+const {
+  UpdateIntegrationSettingsResolver
+} = require('../src/resolver/integration/update-integration-settings.resolver')
+const {
+  DeleteIntegrationSettingsResolver
+} = require('../src/resolver/integration/delete-integration-settings.resolver')
+const {
+  UpdateIntegrationStatusResolver
+} = require('../src/resolver/integration/update-integration-status.resolver')
+const { IntegrationOAuthController } = require('../src/controller/integration-oauth.controller')
+const { decryptSecret, encryptSecret } = require('../src/utils/crypto')
+const { IntegrationStatusEnum } = require('../src/model/integration.model')
+const webhook = require('../src/apps/webhook').default
+
+const NEEDS_RECONNECT = IntegrationStatusEnum.NEEDS_RECONNECT
+
+// --- fake OAuth2 provider ---------------------------------------------------
+
+interface TokenRequest {
+  params: Record<string, string>
+}
+
+type TokenHandler = (params: Record<string, string>) => { status: number; body: unknown }
+
+class FakeProvider {
+  requests: TokenRequest[] = []
+  handler: TokenHandler = () => ({ status: 500, body: {} })
+  private server = http.createServer((req, res) => {
+    let raw = ''
+    req.on('data', chunk => (raw += chunk))
+    req.on('end', () => {
+      const params = Object.fromEntries(new URLSearchParams(raw))
+      this.requests.push({ params })
+
+      const { status, body } = this.handler(params)
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(body))
+    })
+  })
+
+  async start(): Promise<void> {
+    await new Promise<void>(resolve => this.server.listen(0, '127.0.0.1', resolve))
+  }
+
+  async stop(): Promise<void> {
+    await new Promise(resolve => this.server.close(resolve))
+  }
+
+  get tokenUrl(): string {
+    return `http://127.0.0.1:${(this.server.address() as AddressInfo).port}/token`
+  }
+}
+
+const provider = new FakeProvider()
+
+// --- in-memory services -----------------------------------------------------
+
+function createStores() {
+  let nextId = 1
+  const integrations = new Map<string, any>()
+  const oauthRecords = new Map<string, any>()
+  const redis = new Map<string, string>()
+
+  const integrationService = {
+    findById: async (id: string) => integrations.get(id) ?? null,
+    findOne: async (formId: string, appId: string) =>
+      [...integrations.values()].find(i => i.formId === formId && i.appId === appId) ?? null,
+    findAllInForm: async (formId: string) =>
+      [...integrations.values()].filter(i => i.formId === formId),
+    create: async (data: any) => {
+      const id = `integration_${nextId++}`
+      integrations.set(id, { ...data, id })
+      return id
+    },
+    update: async (id: string, updates: any) => {
+      integrations.set(id, { ...integrations.get(id), ...updates })
+      return true
+    },
+    createOrUpdate: async (formId: string, appId: string, updates: any) => {
+      const existing = await integrationService.findOne(formId, appId)
+
+      if (existing) {
+        await integrationService.update(existing.id, updates)
+        return existing.id
+      }
+
+      return integrationService.create({ formId, appId, ...updates })
+    }
+  }
+
+  const thirdPartyService = {
+    findById: async (id: string) => oauthRecords.get(id) ?? null,
+    createOrUpdate: async (appId: string, openId: string, scope: string, updates: any) => {
+      const existing = [...oauthRecords.values()].find(
+        r => r.appId === appId && r.openId === openId && r.scope === scope
+      )
+      const id = existing?.id ?? `oauth_${nextId++}`
+      oauthRecords.set(id, { ...existing, appId, openId, scope, ...updates, id })
+      return id
+    },
+    update: async (id: string, updates: any) => {
+      oauthRecords.set(id, { ...oauthRecords.get(id), ...updates })
+      return true
+    },
+    delete: async (id: string) => oauthRecords.delete(id)
+  }
+
+  const redisService = {
+    set: async ({ key, value }: { key: string; value: string }) => {
+      redis.set(key, value)
+      return 'OK'
+    },
+    getdel: async (key: string) => {
+      const value = redis.get(key) ?? null
+      redis.delete(key)
+      return value
+    }
+  }
+
+  return { integrations, oauthRecords, redis, integrationService, thirdPartyService, redisService }
+}
+
+const oauthApp: AppDefinition = defineApp({
+  id: 'fakeapp',
+  name: 'Fake App',
+  description: 'Uses the fake provider',
+  icon: '/static/fake.png',
+  auth: { type: 'oauth2', provider: 'fake', scopes: ['rows.read', 'rows.write'] },
+  settings: [{ type: 'text', name: 'sheet', label: 'Sheet', required: true }],
+  run: async () => undefined
+})
+
+const apiKeyApp: AppDefinition = defineApp({
+  id: 'keyapp',
+  name: 'Key App',
+  description: 'Uses an API key',
+  icon: '/static/key.png',
+  auth: { type: 'apiKey', label: 'Secret token' },
+  settings: [{ type: 'text', name: 'list', label: 'List', required: true }],
+  run: async () => undefined
+})
+
+function createAppService(apps: AppDefinition[] = [oauthApp, apiKeyApp, webhook]) {
+  const appService = new AppService()
+  ;(appService as any).apps = Object.fromEntries(apps.map(app => [app.id, app]))
+  appService.providers = {
+    fake: {
+      id: 'fake',
+      name: 'Fake',
+      authorizeUrl: 'https://auth.fake.example/authorize',
+      tokenUrl: provider.tokenUrl,
+      authorizeParams: { access_type: 'offline' },
+      pkce: true
+    },
+    unconfigured: {
+      id: 'unconfigured',
+      name: 'Unconfigured',
+      authorizeUrl: 'https://auth.unconfigured.example/authorize',
+      tokenUrl: provider.tokenUrl
+    }
+  }
+
+  return appService
+}
+
+function createAuth() {
+  const stores = createStores()
+  const appService = createAppService()
+  const service = new IntegrationAuthService(
+    appService,
+    stores.integrationService,
+    stores.thirdPartyService,
+    stores.redisService
+  )
+
+  return { ...stores, appService, service }
+}
+
+// Stores an oauth connection as completeAuthorization would
+async function connect(
+  ctx: ReturnType<typeof createAuth>,
+  tokens: { accessToken?: string; refreshToken?: string; expiresAt?: number },
+  integration: Record<string, any> = {}
+) {
+  const oauthId = await ctx.thirdPartyService.createOrUpdate('fakeapp', 'x', 'rows.read', {
+    tokens: {
+      accessToken: tokens.accessToken
+        ? encryptSecret(tokens.accessToken, process.env.FORM_ENCRYPTION_KEY)
+        : undefined,
+      refreshToken: tokens.refreshToken
+        ? encryptSecret(tokens.refreshToken, process.env.FORM_ENCRYPTION_KEY)
+        : undefined,
+      expiresAt: tokens.expiresAt
+    }
+  })
+  const integrationId = await ctx.integrationService.create({
+    formId: 'form_1',
+    appId: 'fakeapp',
+    config: { sheet: 'Leads' },
+    status: IntegrationStatusEnum.ACTIVE,
+    thirdPartyOauthId: oauthId,
+    ...integration
+  })
+
+  return { oauthId, integrationId, integration: ctx.integrations.get(integrationId) }
+}
+
+function storedTokens(ctx: ReturnType<typeof createAuth>, oauthId: string) {
+  const tokens = ctx.oauthRecords.get(oauthId).tokens
+  const key = process.env.FORM_ENCRYPTION_KEY!
+
+  return {
+    raw: tokens,
+    accessToken: tokens.accessToken && decryptSecret(tokens.accessToken, key),
+    refreshToken: tokens.refreshToken && decryptSecret(tokens.refreshToken, key),
+    expiresAt: tokens.expiresAt
+  }
+}
+
+async function assertBadRequest(promise: Promise<unknown>, message: RegExp) {
+  await assert.rejects(promise, (error: any) => {
+    assert.ok(error instanceof BadRequestException, `expected BadRequestException, got ${error}`)
+    assert.match(error.message, message)
+    return true
+  })
+}
+
+// --- defineApp --------------------------------------------------------------
+
+function testDefineAppValidatesAuthAndQueue() {
+  const base = {
+    id: 'bad',
+    name: 'Bad',
+    description: '',
+    icon: '',
+    settings: [],
+    run: async () => undefined
+  }
+
+  assert.deepStrictEqual(oauthApp.auth, {
+    type: 'oauth2',
+    provider: 'fake',
+    scopes: ['rows.read', 'rows.write']
+  })
+  assert.throws(
+    () => defineApp({ ...base, auth: { type: 'oauth2', provider: 'fake', scopes: [] } }),
+    /needs a provider and at least one scope/
+  )
+
+  for (const queue of [{ attempts: 0 }, { attempts: 1.5 }, { timeout: -1 }]) {
+    assert.throws(() => defineApp({ ...base, queue }), /queue\.(attempts|timeout)/)
+  }
+
+  for (const backoff of [-1, { type: 'linear', delay: 1 }, { type: 'fixed' }]) {
+    assert.throws(() => defineApp({ ...base, queue: { backoff } as any }), /queue\.backoff/)
+  }
+
+  defineApp({ ...base, queue: { attempts: 5, backoff: 0, timeout: 1000 } })
+}
+
+// --- crypto -----------------------------------------------------------------
+
+function testEncryptSecret() {
+  const first = encryptSecret('refresh-token-value', 'key')
+  const second = encryptSecret('refresh-token-value', 'key')
+
+  assert.notStrictEqual(first, second, 'each encryption uses a fresh IV')
+  assert.ok(!first.includes('refresh-token-value'))
+  assert.strictEqual(decryptSecret(first, 'key'), 'refresh-token-value')
+  assert.throws(() => decryptSecret(first, 'other-key'))
+
+  const parts = first.split('.')
+  const data = Buffer.from(parts[3], 'base64')
+  data[0] ^= 1
+  parts[3] = data.toString('base64')
+  assert.throws(() => decryptSecret(parts.join('.'), 'key'), 'tampering is detected')
+}
+
+// --- queue options ----------------------------------------------------------
+
+function testAppJobOptions() {
+  assert.deepStrictEqual(getAppJobOptions(webhook), {})
+  assert.deepStrictEqual(getAppJobOptions({ ...oauthApp, queue: { attempts: 5 } }), {
+    attempts: 5
+  })
+  assert.deepStrictEqual(
+    getAppJobOptions({
+      ...oauthApp,
+      queue: { attempts: 8, backoff: { type: 'exponential', delay: 2000 }, timeout: 30000 }
+    }),
+    { attempts: 8, backoff: { type: 'exponential', delay: 2000 }, timeout: 30000 }
+  )
+  assert.deepStrictEqual(getAppJobOptions({ ...oauthApp, queue: { backoff: 500 } }), {
+    backoff: { type: 'fixed', delay: 500 }
+  })
+}
+
+async function testAddQueueAppliesAppOptions() {
+  const queuedApp = { ...oauthApp, queue: { attempts: 6, timeout: 45000 } }
+  const added: any[] = []
+  const integrationModel = {
+    find: async () => [
+      { id: 'integration_1', appId: 'fakeapp' },
+      { id: 'integration_2', appId: 'webhook' },
+      { id: 'integration_3', appId: 'removed' }
+    ]
+  }
+  const queue = { add: (data: any, options: any) => added.push({ data, options }) }
+  const service = new IntegrationService(
+    integrationModel,
+    createAppService([queuedApp, webhook]),
+    queue,
+    { add: () => undefined }
+  )
+
+  await service.addQueue({ id: 'form_1', settings: {} }, 'submission_1')
+
+  assert.deepStrictEqual(added, [
+    {
+      data: {
+        appId: 'fakeapp',
+        formId: 'form_1',
+        integrationId: 'integration_1',
+        submissionId: 'submission_1'
+      },
+      options: { attempts: 6, timeout: 45000 }
+    },
+    {
+      data: {
+        appId: 'webhook',
+        formId: 'form_1',
+        integrationId: 'integration_2',
+        submissionId: 'submission_1'
+      },
+      options: {}
+    }
+  ])
+}
+
+// --- availability -----------------------------------------------------------
+
+async function testHidesAppsWithoutProviderCredentials() {
+  const unconfigured = defineApp({
+    ...oauthApp,
+    id: 'unconfiguredapp',
+    auth: { type: 'oauth2', provider: 'unconfigured', scopes: ['x'] }
+  })
+  const unknownProvider = defineApp({
+    ...oauthApp,
+    id: 'unknownapp',
+    auth: { type: 'oauth2', provider: 'constructor', scopes: ['x'] }
+  })
+  const appService = createAppService([oauthApp, apiKeyApp, webhook, unconfigured, unknownProvider])
+  const apps = await new AppsResolver(appService).apps()
+
+  assert.deepStrictEqual(
+    apps.map((app: any) => [app.id, app.auth]),
+    [
+      ['fakeapp', { type: 'oauth2', provider: 'fake', providerName: 'Fake' }],
+      ['keyapp', { type: 'apiKey', label: 'Secret token', description: undefined }],
+      ['webhook', { type: 'none' }]
+    ]
+  )
+  assert.strictEqual(appService.isAvailable(unconfigured), false)
+}
+
+// --- API keys ---------------------------------------------------------------
+
+function createSettingsResolver(ctx: ReturnType<typeof createAuth>) {
+  return new UpdateIntegrationSettingsResolver(ctx.appService, ctx.integrationService, ctx.service)
+}
+
+async function testApiKeyIsStoredEncryptedAndNeverReturned() {
+  const ctx = createAuth()
+  const resolver = createSettingsResolver(ctx)
+  const apiKey = 'sk_live_0123456789abcdefWXYZ'
+
+  await assertBadRequest(
+    resolver.updateIntegrationSettings({
+      formId: 'form_1',
+      appId: 'keyapp',
+      config: { list: 'a' }
+    }),
+    /Secret token is required/
+  )
+
+  await resolver.updateIntegrationSettings({
+    formId: 'form_1',
+    appId: 'keyapp',
+    config: { list: 'a', apiKey: 'in-config' },
+    apiKey
+  })
+
+  const [integration] = ctx.integrations.values()
+  assert.deepStrictEqual(integration.config, { list: 'a' }, 'the key never lands in config')
+  assert.ok(!JSON.stringify(integration).includes(apiKey), 'stored encrypted')
+  assert.strictEqual(integration.apiKeyHint, '••••WXYZ')
+
+  const [listed] = await new FormIntegrationsResolver(ctx.integrationService).formIntegrations({
+    formId: 'form_1'
+  })
+  assert.deepStrictEqual(listed, {
+    formId: 'form_1',
+    appId: 'keyapp',
+    config: { list: 'a' },
+    status: IntegrationStatusEnum.ACTIVE,
+    connected: false,
+    apiKeyHint: '••••WXYZ'
+  })
+  assert.ok(!JSON.stringify(listed).includes(integration.apiKey), 'ciphertext not returned')
+
+  // Saving again without a key keeps the stored one
+  await resolver.updateIntegrationSettings({
+    formId: 'form_1',
+    appId: 'keyapp',
+    config: { list: 'b' }
+  })
+  assert.deepStrictEqual(
+    await ctx.service.getRunAuth(apiKeyApp, ctx.integrations.get(integration.id)),
+    {
+      type: 'apiKey',
+      apiKey
+    }
+  )
+}
+
+function testMaskApiKey() {
+  assert.strictEqual(maskApiKey('0123456789abcdef'), '••••cdef')
+  assert.strictEqual(maskApiKey('short-key'), '••••')
+}
+
+async function testMissingApiKeyFailsWithoutRetry() {
+  const { service } = createAuth()
+
+  await assert.rejects(
+    service.getRunAuth(apiKeyApp, { id: 'i', apiKey: undefined }),
+    (error: any) => error instanceof IntegrationAuthError && !error.needsReconnect
+  )
+  await assert.rejects(
+    service.getRunAuth(apiKeyApp, { id: 'i', apiKey: encryptSecret('k', 'other-key') }),
+    (error: any) => error instanceof IntegrationAuthError && /enter it again/.test(error.message)
+  )
+}
+
+// --- OAuth2 connect ---------------------------------------------------------
+
+async function testAuthorizeUrlAndState() {
+  const ctx = createAuth()
+  const { url, state } = await ctx.service.createAuthorization(oauthApp, 'form_1', 'user_1')
+  const parsed = new URL(url)
+  const stored = JSON.parse(ctx.redis.get(`integration_oauth_state:${state}`)!)
+
+  assert.strictEqual(parsed.origin + parsed.pathname, 'https://auth.fake.example/authorize')
+  assert.strictEqual(parsed.searchParams.get('client_id'), 'fake-client-id')
+  assert.strictEqual(
+    parsed.searchParams.get('redirect_uri'),
+    'https://heyform.example.com/api/integrations/oauth/callback'
+  )
+  assert.strictEqual(parsed.searchParams.get('response_type'), 'code')
+  assert.strictEqual(parsed.searchParams.get('scope'), 'rows.read rows.write')
+  assert.strictEqual(parsed.searchParams.get('state'), state)
+  assert.strictEqual(parsed.searchParams.get('access_type'), 'offline')
+  assert.ok(!url.includes('fake-client-secret'), 'the client secret stays on the server')
+  assert.ok(state.length >= 43)
+
+  // PKCE: the challenge is the S256 hash of the verifier kept server-side
+  assert.strictEqual(parsed.searchParams.get('code_challenge_method'), 'S256')
+  assert.strictEqual(
+    parsed.searchParams.get('code_challenge'),
+    crypto.createHash('sha256').update(stored.codeVerifier).digest('base64url')
+  )
+  assert.deepStrictEqual(
+    { ...stored, codeVerifier: undefined },
+    { appId: 'fakeapp', formId: 'form_1', userId: 'user_1', codeVerifier: undefined }
+  )
+
+  await assertBadRequest(
+    ctx.service.createAuthorization(
+      { ...oauthApp, auth: { type: 'oauth2', provider: 'unconfigured', scopes: ['x'] } },
+      'form_1',
+      'user_1'
+    ),
+    /not available on this server/
+  )
+}
+
+async function testStateIsBoundToUserAndSingleUse() {
+  const ctx = createAuth()
+  const first = await ctx.service.createAuthorization(oauthApp, 'form_1', 'user_1')
+
+  await assertBadRequest(
+    ctx.service.consumeAuthorization(first.state, 'user_2'),
+    /Invalid OAuth state/
+  )
+
+  const second = await ctx.service.createAuthorization(oauthApp, 'form_1', 'user_1')
+  const pending = await ctx.service.consumeAuthorization(second.state, 'user_1')
+  assert.strictEqual(pending.formId, 'form_1')
+
+  await assertBadRequest(
+    ctx.service.consumeAuthorization(second.state, 'user_1'),
+    /Invalid OAuth state/
+  )
+  await assertBadRequest(ctx.service.consumeAuthorization('', 'user_1'), /Invalid OAuth state/)
+}
+
+async function testCompleteAuthorizationStoresEncryptedTokens() {
+  const ctx = createAuth()
+  provider.requests = []
+  provider.handler = () => ({
+    status: 200,
+    body: { access_token: 'access-1', refresh_token: 'refresh-1', expires_in: 3600 }
+  })
+
+  await ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-1', 'verifier-1')
+
+  assert.deepStrictEqual(provider.requests[0].params, {
+    grant_type: 'authorization_code',
+    code: 'code-1',
+    redirect_uri: 'https://heyform.example.com/api/integrations/oauth/callback',
+    code_verifier: 'verifier-1',
+    client_id: 'fake-client-id',
+    client_secret: 'fake-client-secret'
+  })
+
+  const [integration] = ctx.integrations.values()
+  assert.strictEqual(integration.status, IntegrationStatusEnum.PENDING, 'not active until saved')
+  assert.ok(integration.thirdPartyOauthId)
+
+  const record = ctx.oauthRecords.get(integration.thirdPartyOauthId)
+  assert.strictEqual(record.openId, integration.id)
+  assert.strictEqual(record.scope, 'rows.read rows.write')
+  assert.ok(!JSON.stringify(record).includes('access-1'))
+  assert.ok(!JSON.stringify(record).includes('refresh-1'))
+
+  const tokens = storedTokens(ctx, integration.thirdPartyOauthId)
+  assert.strictEqual(tokens.accessToken, 'access-1')
+  assert.strictEqual(tokens.refreshToken, 'refresh-1')
+  assert.ok(Math.abs(tokens.expiresAt - (Date.now() + 3600_000)) < 5000)
+
+  const [listed] = await new FormIntegrationsResolver(ctx.integrationService).formIntegrations({
+    formId: 'form_1'
+  })
+  assert.strictEqual(listed.connected, true)
+  assert.ok(!JSON.stringify(listed).includes(integration.thirdPartyOauthId))
+}
+
+async function testReconnectRestoresStatusAndKeepsRefreshToken() {
+  const ctx = createAuth()
+  const { oauthId, integrationId } = await connect(
+    ctx,
+    { accessToken: 'old', refreshToken: 'refresh-old', expiresAt: 1 },
+    { status: NEEDS_RECONNECT }
+  )
+  provider.handler = () => ({ status: 200, body: { access_token: 'access-new', expires_in: 60 } })
+
+  await ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-2')
+
+  const integration = ctx.integrations.get(integrationId)
+  assert.strictEqual(integration.status, IntegrationStatusEnum.ACTIVE)
+  assert.ok(!ctx.oauthRecords.has(oauthId), 'the replaced connection is deleted')
+
+  const tokens = storedTokens(ctx, integration.thirdPartyOauthId)
+  assert.strictEqual(tokens.accessToken, 'access-new')
+  assert.strictEqual(tokens.refreshToken, 'refresh-old')
+}
+
+async function testSettingsNeedAConnectedAccount() {
+  const ctx = createAuth()
+  const resolver = createSettingsResolver(ctx)
+
+  await assertBadRequest(
+    resolver.updateIntegrationSettings({
+      formId: 'form_1',
+      appId: 'fakeapp',
+      config: { sheet: 'Leads' }
+    }),
+    /Connect your Fake account first/
+  )
+
+  const { integrationId } = await connect(
+    ctx,
+    { accessToken: 'a', refreshToken: 'r' },
+    { status: NEEDS_RECONNECT }
+  )
+  await resolver.updateIntegrationSettings({
+    formId: 'form_1',
+    appId: 'fakeapp',
+    config: { sheet: 'Other' }
+  })
+  assert.strictEqual(
+    ctx.integrations.get(integrationId).status,
+    NEEDS_RECONNECT,
+    'saving settings does not hide a revoked grant'
+  )
+
+  const statusResolver = new UpdateIntegrationStatusResolver(ctx.integrationService)
+  await assertBadRequest(
+    statusResolver.updateIntegrationStatus({
+      formId: 'form_1',
+      appId: 'fakeapp',
+      status: IntegrationStatusEnum.ACTIVE
+    }),
+    /Reconnect the account/
+  )
+}
+
+async function testDeletingTheIntegrationDropsItsTokens() {
+  const ctx = createAuth()
+  const { oauthId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  const deleted: string[] = []
+  const integrationService = {
+    ...ctx.integrationService,
+    delete: async (formId: string, appId: string) => {
+      deleted.push(`${formId}/${appId}`)
+      return true
+    }
+  }
+
+  await new DeleteIntegrationSettingsResolver(
+    integrationService,
+    ctx.service
+  ).deleteIntegrationSettings({ formId: 'form_1', appId: 'fakeapp' })
+
+  assert.deepStrictEqual(deleted, ['form_1/fakeapp'])
+  assert.strictEqual(ctx.oauthRecords.has(oauthId), false)
+}
+
+// --- refresh on use ---------------------------------------------------------
+
+async function testValidTokenIsUsedWithoutRefresh() {
+  const ctx = createAuth()
+  const { integration } = await connect(ctx, {
+    accessToken: 'access-valid',
+    refreshToken: 'refresh-1',
+    expiresAt: Date.now() + 3600_000
+  })
+  provider.requests = []
+
+  assert.deepStrictEqual(await ctx.service.getRunAuth(oauthApp, integration), {
+    type: 'oauth2',
+    accessToken: 'access-valid'
+  })
+  assert.strictEqual(provider.requests.length, 0)
+}
+
+async function testExpiredTokenIsRefreshed() {
+  const ctx = createAuth()
+  // Expires within the safety margin, so it counts as expired
+  const { oauthId, integration } = await connect(ctx, {
+    accessToken: 'access-old',
+    refreshToken: 'refresh-1',
+    expiresAt: Date.now() + 30_000
+  })
+  provider.requests = []
+  provider.handler = () => ({
+    status: 200,
+    body: { access_token: 'access-new', refresh_token: 'refresh-2', expires_in: 3600 }
+  })
+
+  assert.strictEqual(await ctx.service.getAccessToken(oauthApp, integration), 'access-new')
+  assert.deepStrictEqual(
+    provider.requests.map(r => r.params),
+    [
+      {
+        grant_type: 'refresh_token',
+        refresh_token: 'refresh-1',
+        client_id: 'fake-client-id',
+        client_secret: 'fake-client-secret'
+      }
+    ]
+  )
+
+  const tokens = storedTokens(ctx, oauthId)
+  assert.strictEqual(tokens.accessToken, 'access-new')
+  assert.strictEqual(tokens.refreshToken, 'refresh-2', 'a rotated refresh token is kept')
+  assert.ok(tokens.expiresAt > Date.now() + 3500_000)
+
+  // The refreshed token is reused until it expires
+  provider.requests = []
+  assert.strictEqual(await ctx.service.getAccessToken(oauthApp, integration), 'access-new')
+  assert.strictEqual(provider.requests.length, 0)
+}
+
+async function testRevokedGrantMarksNeedsReconnect() {
+  const ctx = createAuth()
+  const { integrationId, integration } = await connect(ctx, {
+    accessToken: 'access-old',
+    refreshToken: 'refresh-revoked',
+    expiresAt: Date.now() - 1000
+  })
+  provider.handler = () => ({
+    status: 400,
+    body: { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }
+  })
+
+  await assert.rejects(ctx.service.getAccessToken(oauthApp, integration), (error: any) => {
+    assert.ok(error instanceof IntegrationAuthError)
+    assert.strictEqual(error.needsReconnect, true)
+    assert.match(error.message, /invalid_grant/)
+    assert.ok(!error.message.includes('refresh-revoked'), 'tokens stay out of messages')
+    return true
+  })
+  assert.strictEqual(ctx.integrations.get(integrationId).status, NEEDS_RECONNECT)
+}
+
+async function testConcurrentRotationIsNotAReconnect() {
+  const ctx = createAuth()
+  const { oauthId, integrationId, integration } = await connect(ctx, {
+    accessToken: 'access-old',
+    refreshToken: 'refresh-1',
+    expiresAt: Date.now() - 1000
+  })
+
+  // Another worker refreshes first and rotates the refresh token
+  provider.handler = () => {
+    const key = process.env.FORM_ENCRYPTION_KEY!
+    ctx.oauthRecords.get(oauthId).tokens = {
+      accessToken: encryptSecret('access-other-worker', key),
+      refreshToken: encryptSecret('refresh-2', key),
+      expiresAt: Date.now() + 3600_000
+    }
+    return { status: 400, body: { error: 'invalid_grant' } }
+  }
+
+  assert.strictEqual(await ctx.service.getAccessToken(oauthApp, integration), 'access-other-worker')
+  assert.strictEqual(ctx.integrations.get(integrationId).status, IntegrationStatusEnum.ACTIVE)
+}
+
+async function testTransientRefreshFailureIsRetried() {
+  const ctx = createAuth()
+  const { integrationId, integration } = await connect(ctx, {
+    accessToken: 'access-old',
+    refreshToken: 'refresh-1',
+    expiresAt: Date.now() - 1000
+  })
+  provider.handler = () => ({ status: 503, body: 'unavailable' })
+
+  await assert.rejects(ctx.service.getAccessToken(oauthApp, integration), (error: any) => {
+    assert.ok(error instanceof OAuth2TokenError, 'not an IntegrationAuthError, so Bull retries')
+    assert.match(error.message, /HTTP 503/)
+    return true
+  })
+  assert.strictEqual(ctx.integrations.get(integrationId).status, IntegrationStatusEnum.ACTIVE)
+
+  // A provider that can't be reached at all
+  const unreachable = createAuth()
+  unreachable.appService.providers.fake.tokenUrl = 'http://127.0.0.1:1/token'
+  const connected = await connect(unreachable, { refreshToken: 'refresh-1', expiresAt: 1 })
+  await assert.rejects(
+    unreachable.service.getAccessToken(oauthApp, connected.integration),
+    (error: any) => error instanceof OAuth2TokenError && /ECONNREFUSED/.test(error.message)
+  )
+}
+
+async function testMissingOrUnreadableConnectionNeedsReconnect() {
+  const ctx = createAuth()
+  const missing = await ctx.integrationService.create({
+    formId: 'form_2',
+    appId: 'fakeapp',
+    status: IntegrationStatusEnum.ACTIVE
+  })
+
+  await assert.rejects(
+    ctx.service.getAccessToken(oauthApp, ctx.integrations.get(missing)),
+    (error: any) => error instanceof IntegrationAuthError && error.needsReconnect
+  )
+  assert.strictEqual(ctx.integrations.get(missing).status, NEEDS_RECONNECT)
+
+  // Tokens encrypted with a key that has since changed
+  const { oauthId, integrationId, integration } = await connect(ctx, {
+    accessToken: 'a',
+    refreshToken: 'r'
+  })
+  ctx.oauthRecords.get(oauthId).tokens.accessToken = encryptSecret('a', 'old-key')
+  await assert.rejects(
+    ctx.service.getAccessToken(oauthApp, integration),
+    (error: any) => error instanceof IntegrationAuthError && error.needsReconnect
+  )
+  assert.strictEqual(ctx.integrations.get(integrationId).status, NEEDS_RECONNECT)
+}
+
+// --- queue ------------------------------------------------------------------
+
+function createQueue(ctx: ReturnType<typeof createAuth>, runs: any[]) {
+  const app = { ...oauthApp, run: async (input: any) => runs.push(input) }
+  const appService = createAppService([app])
+
+  return new IntegrationQueue(
+    appService,
+    ctx.integrationService,
+    new IntegrationAuthService(
+      appService,
+      ctx.integrationService,
+      ctx.thirdPartyService,
+      ctx.redisService
+    ),
+    { findById: async () => ({ id: 'submission_1' }) },
+    { findById: async () => ({ id: 'form_1' }) }
+  )
+}
+
+function createJob(integrationId: string) {
+  const job = {
+    discarded: false,
+    data: {
+      appId: 'fakeapp',
+      formId: 'form_1',
+      integrationId,
+      submissionId: 'submission_1'
+    },
+    discard: async () => {
+      job.discarded = true
+    }
+  }
+
+  return job
+}
+
+async function testJobRefreshesAndPassesAuthToRun() {
+  const ctx = createAuth()
+  const runs: any[] = []
+  const { integrationId } = await connect(ctx, {
+    accessToken: 'access-old',
+    refreshToken: 'refresh-1',
+    expiresAt: Date.now() - 1000
+  })
+  provider.handler = () => ({ status: 200, body: { access_token: 'access-fresh', expires_in: 60 } })
+
+  const job = createJob(integrationId)
+  await createQueue(ctx, runs).process(job)
+
+  assert.strictEqual(runs.length, 1)
+  assert.deepStrictEqual(runs[0].auth, { type: 'oauth2', accessToken: 'access-fresh' })
+  assert.deepStrictEqual(runs[0].config, { sheet: 'Leads' })
+  assert.strictEqual(job.discarded, false)
+}
+
+async function testJobStopsRetryingWhenReconnectIsNeeded() {
+  const ctx = createAuth()
+  const runs: any[] = []
+  const { integrationId } = await connect(ctx, {
+    refreshToken: 'refresh-revoked',
+    expiresAt: Date.now() - 1000
+  })
+  provider.handler = () => ({ status: 400, body: { error: 'invalid_grant' } })
+
+  const job = createJob(integrationId)
+  await assert.rejects(createQueue(ctx, runs).process(job), IntegrationAuthError)
+  assert.strictEqual(job.discarded, true, 'no further attempts')
+  assert.strictEqual(runs.length, 0)
+  assert.strictEqual(ctx.integrations.get(integrationId).status, NEEDS_RECONNECT)
+
+  // Jobs already queued fail straight away, without calling the provider
+  provider.requests = []
+  const queued = createJob(integrationId)
+  await assert.rejects(createQueue(ctx, runs).process(queued), /needs reconnecting/)
+  assert.strictEqual(queued.discarded, true)
+  assert.strictEqual(provider.requests.length, 0)
+}
+
+async function testJobRetriesTransientRefreshFailures() {
+  const ctx = createAuth()
+  const { integrationId } = await connect(ctx, { refreshToken: 'r', expiresAt: 1 })
+  provider.handler = () => ({ status: 500, body: {} })
+
+  const job = createJob(integrationId)
+  await assert.rejects(createQueue(ctx, []).process(job), OAuth2TokenError)
+  assert.strictEqual(job.discarded, false, 'Bull may try again')
+}
+
+// --- callback controller ----------------------------------------------------
+
+function createController(ctx: ReturnType<typeof createAuth>, members = true) {
+  const controller = new IntegrationOAuthController(
+    ctx.appService,
+    {
+      findById: async (id: string) =>
+        id === 'form_1' ? { id: 'form_1', teamId: 'team_1', projectId: 'project_1' } : null
+    },
+    { findMemberById: async () => (members ? { id: 'member' } : null) },
+    { findMemberById: async () => (members ? { id: 'member' } : null) },
+    ctx.service
+  )
+
+  return controller
+}
+
+function createResponse() {
+  const res = {
+    cookies: {} as Record<string, any>,
+    cleared: [] as string[],
+    redirectedTo: undefined as string | undefined,
+    cookie(name: string, value: string, options: any) {
+      res.cookies[name] = { value, options }
+    },
+    clearCookie(name: string) {
+      res.cleared.push(name)
+    },
+    redirect(_status: number, url: string) {
+      res.redirectedTo = url
+    }
+  }
+
+  return res
+}
+
+async function startAuthorization(ctx: ReturnType<typeof createAuth>) {
+  const res = createResponse()
+  await createController(ctx).authorize('form_1', 'fakeapp', { id: 'user_1' }, res)
+
+  const cookie = res.cookies.HEYFORM_INTEGRATION_OAUTH_STATE
+  assert.strictEqual(cookie.options.httpOnly, true)
+  assert.strictEqual(cookie.options.path, '/api/integrations/oauth')
+
+  const state = new URL(res.redirectedTo!).searchParams.get('state')!
+  assert.strictEqual(cookie.value, state)
+
+  return state
+}
+
+async function testCallbackConnectsAndRedirectsBack() {
+  const ctx = createAuth()
+  const state = await startAuthorization(ctx)
+  provider.handler = () => ({ status: 200, body: { access_token: 'a', refresh_token: 'r' } })
+
+  const res = createResponse()
+  await createController(ctx).callback(
+    { state, code: 'code-1' },
+    { id: 'user_1' },
+    { cookies: { HEYFORM_INTEGRATION_OAUTH_STATE: state } },
+    res
+  )
+
+  assert.strictEqual(
+    res.redirectedTo,
+    '/workspace/team_1/project/project_1/form/form_1/integrations?appId=fakeapp&integrationConnected=1'
+  )
+  assert.deepStrictEqual(res.cleared, ['HEYFORM_INTEGRATION_OAUTH_STATE'])
+  assert.ok([...ctx.integrations.values()][0].thirdPartyOauthId)
+}
+
+async function testCallbackRejectsForeignOrForgedState() {
+  const ctx = createAuth()
+  const state = await startAuthorization(ctx)
+  const controller = createController(ctx)
+
+  // No cookie, e.g. a link opened in another browser
+  await assertBadRequest(
+    controller.callback({ state, code: 'c' }, { id: 'user_1' }, { cookies: {} }, createResponse()),
+    /Invalid OAuth state/
+  )
+  // Cookie doesn't match
+  await assertBadRequest(
+    controller.callback(
+      { state, code: 'c' },
+      { id: 'user_1' },
+      { cookies: { HEYFORM_INTEGRATION_OAUTH_STATE: 'x'.repeat(state.length) } },
+      createResponse()
+    ),
+    /Invalid OAuth state/
+  )
+  // Another logged-in user
+  await assertBadRequest(
+    controller.callback(
+      { state, code: 'c' },
+      { id: 'user_2' },
+      { cookies: { HEYFORM_INTEGRATION_OAUTH_STATE: state } },
+      createResponse()
+    ),
+    /Invalid OAuth state/
+  )
+  assert.strictEqual(ctx.integrations.size, 0)
+
+  // Lost access to the form while at the provider
+  const second = await startAuthorization(ctx)
+  await assertBadRequest(
+    createController(ctx, false).callback(
+      { state: second, code: 'c' },
+      { id: 'user_1' },
+      { cookies: { HEYFORM_INTEGRATION_OAUTH_STATE: second } },
+      createResponse()
+    ),
+    /permission/
+  )
+  assert.strictEqual(ctx.integrations.size, 0)
+}
+
+async function testCallbackReportsDeniedAndFailedConnections() {
+  const ctx = createAuth()
+  const denied = await startAuthorization(ctx)
+  const res = createResponse()
+
+  await createController(ctx).callback(
+    { state: denied, error: 'access_denied' },
+    { id: 'user_1' },
+    { cookies: { HEYFORM_INTEGRATION_OAUTH_STATE: denied } },
+    res
+  )
+  assert.match(res.redirectedTo!, /\?appId=fakeapp&integrationError=access_denied$/)
+
+  const failed = await startAuthorization(ctx)
+  const failedRes = createResponse()
+  provider.handler = () => ({ status: 400, body: { error: 'invalid_grant' } })
+
+  await createController(ctx).callback(
+    { state: failed, code: 'expired-code' },
+    { id: 'user_1' },
+    { cookies: { HEYFORM_INTEGRATION_OAUTH_STATE: failed } },
+    failedRes
+  )
+  assert.match(failedRes.redirectedTo!, /integrationError=connect_failed$/)
+  assert.strictEqual(ctx.integrations.size, 0)
+}
+
+async function run() {
+  await provider.start()
+
+  try {
+    testDefineAppValidatesAuthAndQueue()
+    testEncryptSecret()
+    testAppJobOptions()
+    await testAddQueueAppliesAppOptions()
+    await testHidesAppsWithoutProviderCredentials()
+    await testApiKeyIsStoredEncryptedAndNeverReturned()
+    testMaskApiKey()
+    await testMissingApiKeyFailsWithoutRetry()
+    await testAuthorizeUrlAndState()
+    await testStateIsBoundToUserAndSingleUse()
+    await testCompleteAuthorizationStoresEncryptedTokens()
+    await testReconnectRestoresStatusAndKeepsRefreshToken()
+    await testSettingsNeedAConnectedAccount()
+    await testDeletingTheIntegrationDropsItsTokens()
+    await testValidTokenIsUsedWithoutRefresh()
+    await testExpiredTokenIsRefreshed()
+    await testRevokedGrantMarksNeedsReconnect()
+    await testConcurrentRotationIsNotAReconnect()
+    await testTransientRefreshFailureIsRetried()
+    await testMissingOrUnreadableConnectionNeedsReconnect()
+    await testJobRefreshesAndPassesAuthToRun()
+    await testJobStopsRetryingWhenReconnectIsNeeded()
+    await testJobRetriesTransientRefreshFailures()
+    await testCallbackConnectsAndRedirectsBack()
+    await testCallbackRejectsForeignOrForgedState()
+    await testCallbackReportsDeniedAndFailedConnections()
+  } finally {
+    await provider.stop()
+  }
+}
+
+if (require.main === module) {
+  run().catch(error => {
+    process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : error}\n`)
+    process.exitCode = 1
+  })
+}

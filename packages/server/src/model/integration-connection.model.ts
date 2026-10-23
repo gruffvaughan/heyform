@@ -20,7 +20,7 @@ export class IntegrationConnectionModel extends Document {
   @Prop({ required: true })
   teamId: string
 
-  // Id of the provider in oauth2-providers.ts, e.g. `google`
+  // Id of the provider in oauth2-providers.ts, e.g. `example`
   @Prop({ required: true })
   provider: string
 

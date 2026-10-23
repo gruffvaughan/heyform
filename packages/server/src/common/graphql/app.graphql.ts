@@ -44,7 +44,7 @@ export class AppAuthType {
   @Field()
   type: string
 
-  // oauth2: provider id and display name, e.g. `google` / `Google`
+  // oauth2: provider id and display name, e.g. `example` / `Example`
   @Field({ nullable: true })
   provider?: string
 

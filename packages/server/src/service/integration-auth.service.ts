@@ -461,10 +461,11 @@ export class IntegrationAuthService {
     const tokens = this.readTokens(connection)
     const token = tokens?.refreshToken || tokens?.accessToken
 
-    // Providers like Google revoke the whole grant, i.e. every token this
-    // server holds for the account, so not while another workspace has the
-    // account connected. Checking and deleting under one lock means two
-    // disconnects at once can't each leave the grant to the other.
+    // Some providers (Google, for one) revoke the whole grant, i.e. every
+    // token this server holds for the account, so the grant is only revoked
+    // when no other workspace has the account connected. Checking and deleting
+    // under one lock means two disconnects at once can't each leave the grant
+    // to the other.
     const isLast = await this.redisService.withLock(
       `integration_revoke:${connection.provider}:${connection.accountId}`,
       REVOKE_LOCK_TTL,

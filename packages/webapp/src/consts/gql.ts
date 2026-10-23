@@ -762,6 +762,7 @@ export const FORM_INTEGRATIONS_GQL = gql`
       config
       status
       connected
+      connectionId
       apiKeyHint
       waitingCount
     }
@@ -1108,6 +1109,48 @@ export const INTEGRATION_RECORDS_GQL = gql`
 export const UPDATE_INTEGRATION_STATUS_GQL = gql`
   mutation updateIntegrationStatus($input: UpdateIntegrationStatusInput!) {
     updateIntegrationStatus(input: $input)
+  }
+`
+
+export const INTEGRATION_CONNECTIONS_GQL = gql`
+  query integrationConnections($input: IntegrationInput!) {
+    integrationConnections(input: $input) {
+      id
+      provider
+      providerName
+      accountEmail
+      accountName
+      connectedBy
+      status
+      statusReason
+      hasScopes
+    }
+  }
+`
+
+export const TEAM_INTEGRATION_CONNECTIONS_GQL = gql`
+  query teamIntegrationConnections($input: TeamDetailInput!) {
+    teamIntegrationConnections(input: $input) {
+      id
+      provider
+      providerName
+      accountEmail
+      accountName
+      connectedBy
+      status
+      statusReason
+      forms {
+        id
+        name
+      }
+      canDisconnect
+    }
+  }
+`
+
+export const DISCONNECT_INTEGRATION_CONNECTION_GQL = gql`
+  mutation disconnectIntegrationConnection($input: IntegrationConnectionInput!) {
+    disconnectIntegrationConnection(input: $input)
   }
 `
 

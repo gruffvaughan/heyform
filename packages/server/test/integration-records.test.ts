@@ -725,6 +725,32 @@ async function testFormIntegrationsReportWaitingCount() {
   )
 }
 
+// --- team connections ---------------------------------------------------------
+
+async function testAConnectionsIntegrationsWaitAndLetGo() {
+  const updates: any[] = []
+  const service = new IntegrationService(
+    { updateMany: async (filter: any, update: any) => updates.push([filter, update]) },
+    {},
+    {},
+    {},
+    {}
+  )
+
+  await service.markConnectionNeedsReconnect('connection_1')
+  assert.deepStrictEqual(updates, [
+    [{ connectionId: 'connection_1', status: ACTIVE }, { status: NEEDS_RECONNECT }]
+  ])
+
+  // Disconnected: active ones wait, and none of them uses it any more
+  updates.length = 0
+  await service.detachConnection('connection_1')
+  assert.deepStrictEqual(updates, [
+    [{ connectionId: 'connection_1', status: ACTIVE }, { status: NEEDS_RECONNECT }],
+    [{ connectionId: 'connection_1' }, { $unset: { connectionId: 1 } }]
+  ])
+}
+
 // --- resolver ---------------------------------------------------------------
 
 async function testResolverReturnsRecentRecordsForTheFormApp() {
@@ -814,6 +840,7 @@ async function run() {
   await testAnAlreadyWaitingSubmissionIsNotCapped()
   await testDeletingDiscardsWaitingSubmissions()
   testWaitingRecordsDoNotExpire()
+  await testAConnectionsIntegrationsWaitAndLetGo()
   await testFormIntegrationsReportWaitingCount()
   await testResolverReturnsRecentRecordsForTheFormApp()
 }

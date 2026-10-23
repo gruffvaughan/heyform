@@ -18,8 +18,14 @@ export interface OAuth2Provider {
   authorizeParams?: Record<string, string>
   // Send a PKCE code challenge (RFC 7636) with the authorize request
   pkce?: boolean
-  // Token revocation endpoint (RFC 7009). When set, a connection's tokens are
-  // revoked there, best effort, when its integration is deleted.
+  // OpenID Connect userinfo endpoint, which identifies the connected account
+  // (`sub`, and `email` / `name` when granted). Connections are per account,
+  // so it's required.
+  userInfoUrl: string
+  // Requested with every app's scopes, so the userinfo endpoint answers
+  identityScopes: string[]
+  // Token revocation endpoint (RFC 7009). When set, the grant is revoked
+  // there, best effort, when the team disconnects the account.
   revokeUrl?: string
 }
 
@@ -35,6 +41,8 @@ export const google: OAuth2Provider = {
   name: 'Google',
   authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
   tokenUrl: 'https://oauth2.googleapis.com/token',
+  userInfoUrl: 'https://openidconnect.googleapis.com/v1/userinfo',
+  identityScopes: ['openid', 'email'],
   // Revokes the whole grant: every token issued to this server's OAuth client
   // for the account, not only the token sent
   revokeUrl: 'https://oauth2.googleapis.com/revoke',

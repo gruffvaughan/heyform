@@ -145,6 +145,30 @@ export class IntegrationService {
     return result.matchedCount > 0
   }
 
+  // --- Team connections ---------------------------------------------------------
+
+  async findAllByConnection(connectionId: string): Promise<IntegrationModel[]> {
+    return this.integrationModel.find({ connectionId })
+  }
+
+  async findAllByConnections(connectionIds: string[]): Promise<IntegrationModel[]> {
+    return this.integrationModel.find({ connectionId: { $in: connectionIds } })
+  }
+
+  // The connection stopped working: its active integrations wait for a reconnect
+  async markConnectionNeedsReconnect(connectionId: string): Promise<void> {
+    await this.integrationModel.updateMany(
+      { connectionId, status: IntegrationStatusEnum.ACTIVE },
+      { status: IntegrationStatusEnum.NEEDS_RECONNECT }
+    )
+  }
+
+  // The connection was removed: its integrations need another account
+  async detachConnection(connectionId: string): Promise<void> {
+    await this.markConnectionNeedsReconnect(connectionId)
+    await this.integrationModel.updateMany({ connectionId }, { $unset: { connectionId: 1 } })
+  }
+
   async createOrUpdate(
     formId: string,
     appId: string,

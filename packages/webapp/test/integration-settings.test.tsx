@@ -4,6 +4,7 @@ import { type Root, createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test } from 'vitest'
 
 import {
+  getConnectionLabel,
   getIntegrationAuthorizeUrl,
   getIntegrationDefaultConfig,
   getIntegrationSetting,
@@ -12,12 +13,18 @@ import {
 
 import { Form } from '../src/components'
 import i18n from '../src/i18n'
-import { ApiKeyItem, ConnectAccount } from '../src/pages/form/Integrations/IntegrationAuthItem'
+import {
+  ApiKeyItem,
+  ConnectAccount,
+  ConnectionItem,
+  ConnectionsLoadFailed
+} from '../src/pages/form/Integrations/IntegrationAuthItem'
 import {
   IntegrationRecordList,
   IntegrationWaitingCount
 } from '../src/pages/form/Integrations/IntegrationRecords'
 import IntegrationSettingsItem from '../src/pages/form/Integrations/IntegrationSettingsItem'
+import { ConnectedAccountList } from '../src/pages/workspace/Settings/ConnectedAccounts'
 import type { AppSettingType, IntegratedAppType } from '../src/types/form'
 
 let root: Root
@@ -185,14 +192,41 @@ test('shows only the masked hint of a saved API key', async () => {
   expect(container.textContent).toContain('A key is saved (••••WXYZ). Leave this blank to keep it.')
 })
 
-test('asks to connect an OAuth2 account before the settings', async () => {
+const connections = [
+  {
+    id: 'c1',
+    provider: 'google',
+    providerName: 'Google',
+    accountEmail: 'ann@example.com',
+    connectedBy: 'Ann',
+    status: 1,
+    hasScopes: true
+  },
+  {
+    id: 'c2',
+    provider: 'google',
+    providerName: 'Google',
+    accountEmail: 'ben@example.com',
+    connectedBy: 'Ben',
+    status: 2,
+    hasScopes: true
+  },
+  {
+    id: 'c3',
+    provider: 'google',
+    providerName: 'Google',
+    accountEmail: 'cat@example.com',
+    connectedBy: 'Cat',
+    status: 1,
+    hasScopes: false
+  }
+]
+
+test('asks to connect an OAuth2 account until the workspace has one', async () => {
   expect(needsAccountConnection(oauthApp)).toBe(true)
-  expect(
-    needsAccountConnection({
-      ...oauthApp,
-      integration: { appId: 'sheets', status: 0, connected: true }
-    })
-  ).toBe(false)
+  expect(needsAccountConnection(oauthApp, [])).toBe(true)
+  // Any of the workspace's accounts will do, whoever connected it
+  expect(needsAccountConnection(oauthApp, connections)).toBe(false)
   expect(needsAccountConnection(apiKeyApp)).toBe(false)
 
   await act(async () => root.render(<ConnectAccount app={oauthApp} formId="form_1" />))
@@ -205,11 +239,94 @@ test('asks to reconnect when the connection stopped working', async () => {
     integration: { appId: 'sheets', status: 3, connected: true, config: { sheet: 'a' } }
   }
 
-  expect(needsAccountConnection(app)).toBe(true)
-
   await act(async () => root.render(<ConnectAccount app={app} formId="form_1" />))
   expect(container.querySelector('button')?.textContent).toBe('Reconnect Google account')
   expect(container.textContent).toContain('Deliveries are paused')
+})
+
+test("labels each account with whose it is and whether it's usable", () => {
+  const t = i18n.t.bind(i18n)
+
+  expect(getConnectionLabel(t, oauthApp, connections[0])).toBe('ann@example.com (connected by Ann)')
+  expect(getConnectionLabel(t, oauthApp, connections[1])).toBe(
+    'ben@example.com (connected by Ben) · needs reconnecting'
+  )
+  expect(getConnectionLabel(t, oauthApp, connections[2])).toBe(
+    "cat@example.com (connected by Cat) · doesn't allow Sheets yet"
+  )
+})
+
+test('picks one of the workspace accounts or connects another', async () => {
+  await renderNode(<ConnectionItem app={oauthApp} formId="form_1" connections={connections} />)
+
+  // Radix renders the options into a hidden native select, after a blank one
+  const options = [...container.querySelectorAll('option')]
+    .filter(option => option.value)
+    .map(option => [option.value, option.textContent, option.disabled])
+  expect(options).toEqual([
+    ['c1', 'ann@example.com (connected by Ann)', false],
+    ['c2', 'ben@example.com (connected by Ben) · needs reconnecting', false],
+    ['c3', "cat@example.com (connected by Cat) · doesn't allow Sheets yet", true]
+  ])
+  expect(container.querySelector('label')?.textContent).toBe('Account')
+  expect(container.textContent).toContain('Accounts are shared with everyone in this workspace.')
+  expect(container.textContent).toContain('Connect another Google account')
+})
+
+test('offers to retry when the accounts fail to load', async () => {
+  let retries = 0
+  await act(async () => root.render(<ConnectionsLoadFailed onRetry={() => retries++} />))
+
+  expect(container.textContent).toContain("Couldn't load the workspace's accounts.")
+  await act(async () => container.querySelector('button')!.click())
+  expect(retries).toBe(1)
+})
+
+test('lists the connected accounts in the workspace settings', async () => {
+  const disconnected: string[] = []
+
+  await act(async () =>
+    root.render(
+      <ConnectedAccountList
+        connections={[
+          {
+            ...connections[0],
+            forms: [
+              { id: 'f1', name: 'Leads' },
+              { id: 'f2', name: 'Survey' }
+            ],
+            canDisconnect: true
+          },
+          { ...connections[1], forms: [{ id: 'f3', name: 'Signups' }], canDisconnect: false },
+          { ...connections[2], forms: [], canDisconnect: true }
+        ]}
+        onDisconnect={connection => disconnected.push(connection.id)}
+      />
+    )
+  )
+
+  const items = [...container.querySelectorAll('li')]
+  expect(items.map(li => li.textContent)).toEqual([
+    expect.stringContaining('Used by 2 forms: Leads, Survey'),
+    expect.stringContaining('Used by 1 form: Signups'),
+    expect.stringContaining('Not used by any form')
+  ])
+  expect(items[0].textContent).toContain('ann@example.com')
+  expect(items[0].textContent).toContain('Connected by Ann')
+  expect(items[0].textContent).toContain('Connected')
+  expect(items[1].textContent).toContain('Needs reconnecting')
+
+  // Only for the member who connected it, or the owner
+  expect(items.map(li => !!li.querySelector('button'))).toEqual([true, false, true])
+  await act(async () => items[0].querySelector('button')!.click())
+  expect(disconnected).toEqual(['c1'])
+})
+
+test('says when the workspace has no connected accounts', async () => {
+  await act(async () => root.render(<ConnectedAccountList connections={[]} />))
+  expect(container.textContent).toBe(
+    'No accounts are connected yet. Connect one from a form’s integrations.'
+  )
 })
 
 test('builds the authorize URL for the form and app', () => {

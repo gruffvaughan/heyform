@@ -127,7 +127,8 @@ export class IntegrationOAuthController {
     try {
       await this.integrationAuthService.completeAuthorization(
         app,
-        form.id,
+        { id: form.id, teamId: form.teamId },
+        user.id,
         code,
         pending.codeVerifier
       )

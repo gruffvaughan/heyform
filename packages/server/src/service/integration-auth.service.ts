@@ -1,13 +1,18 @@
-import { BadRequestException, Injectable } from '@nestjs/common'
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common'
 import * as crypto from 'crypto'
 import got from 'got'
 
 import { AppService } from './app.service'
+import { IntegrationConnectionService } from './integration-connection.service'
 import { IntegrationService } from './integration.service'
 import { RedisService } from './redis.service'
-import { ThirdPartyService } from './third-party.service'
 import { APP_HOMEPAGE_URL, FORM_ENCRYPTION_KEY } from '@environments'
-import { IntegrationModel, IntegrationStatusEnum, ThirdPartyOauthModel } from '@model'
+import {
+  IntegrationConnectionModel,
+  IntegrationConnectionStatusEnum,
+  IntegrationModel,
+  IntegrationStatusEnum
+} from '@model'
 import { Logger, decryptSecret, encryptSecret, mapToObject } from '@utils'
 
 import { ConfiguredOAuth2Provider } from '../apps/oauth2-providers'
@@ -17,17 +22,22 @@ export const INTEGRATION_OAUTH_CALLBACK_PATH = '/api/integrations/oauth/callback
 
 const STATE_TTL = '10m'
 const TOKEN_REQUEST_TIMEOUT = 15_000
-// Revocation is best effort, so it shouldn't hold up deleting an integration
+// Revocation is best effort, so it shouldn't hold up disconnecting
 const REVOKE_REQUEST_TIMEOUT = 10_000
+// One refresh per connection at a time. Waiting jobs give up after ~30s and
+// Bull retries them.
 const REVOKE_LOCK_TTL = '10s'
+const REFRESH_LOCK_TTL = '30s'
+const REFRESH_LOCK_RETRIES = 300
+const REFRESH_LOCK_RETRY_DELAY = 100
 // Refresh a little before the provider's expiry, so a token doesn't expire
 // between being handed to run() and being used
 const EXPIRY_MARGIN = 60_000
 
 /**
  * A credential problem that retrying won't fix: the job fails without further
- * attempts. `needsReconnect` means the form owner has to connect the account
- * again, and the integration has been marked so.
+ * attempts. `needsReconnect` means someone has to connect the account (or
+ * enter the API key) again; the submission waits until then.
  */
 export class IntegrationAuthError extends Error {
   constructor(
@@ -56,6 +66,15 @@ interface OAuth2TokenResponse {
   refresh_token?: string
   expires_in?: number
   token_type?: string
+  // Granted scopes, space-separated
+  scope?: string
+}
+
+// The provider's account behind a connection
+export interface ConnectedAccount {
+  id: string
+  email?: string
+  name?: string
 }
 
 interface StoredTokens {
@@ -88,7 +107,7 @@ export class IntegrationAuthService {
   constructor(
     private readonly appService: AppService,
     private readonly integrationService: IntegrationService,
-    private readonly thirdPartyService: ThirdPartyService,
+    private readonly connectionService: IntegrationConnectionService,
     private readonly redisService: RedisService
   ) {}
 
@@ -131,7 +150,13 @@ export class IntegrationAuthService {
     userId: string
   ): Promise<{ url: string; state: string }> {
     const provider = this.requireProvider(app)
-    const scopes = app.auth.type === 'oauth2' ? app.auth.scopes : []
+    // The identity scopes let the userinfo endpoint say whose account it is
+    const scopes = [
+      ...new Set([
+        ...provider.identityScopes,
+        ...(app.auth.type === 'oauth2' ? app.auth.scopes : [])
+      ])
+    ]
     const state = base64Url(crypto.randomBytes(32))
     const codeVerifier = provider.pkce ? base64Url(crypto.randomBytes(32)) : undefined
     const data: IntegrationOAuthState = { appId: app.id, formId, userId, codeVerifier }
@@ -187,15 +212,18 @@ export class IntegrationAuthService {
   }
 
   /**
-   * Exchanges the authorization code and stores the tokens for the form's
-   * integration, creating a pending integration if there isn't one yet.
+   * Exchanges the authorization code, identifies the account and stores its
+   * tokens as a connection of the form's team: a new one, or the team's
+   * existing connection to the same account. The form's integration then uses
+   * it (created pending if there isn't one yet). Returns the connection id.
    */
   async completeAuthorization(
     app: AppDefinition,
-    formId: string,
+    form: { id: string; teamId: string },
+    userId: string,
     code: string,
     codeVerifier?: string
-  ): Promise<void> {
+  ): Promise<string> {
     const provider = this.requireProvider(app)
     const response = await this.requestToken(provider, {
       grant_type: 'authorization_code',
@@ -203,12 +231,17 @@ export class IntegrationAuthService {
       redirect_uri: this.redirectUri,
       ...(codeVerifier ? { code_verifier: codeVerifier } : {})
     })
+    const account = await this.fetchAccount(provider, response.access_token)
+    const requested = app.auth.type === 'oauth2' ? app.auth.scopes : []
+    const granted = response.scope ? response.scope.split(/\s+/).filter(Boolean) : requested
 
-    const integration = await this.integrationService.findOne(formId, app.id)
-    const previous = integration?.thirdPartyOauthId
-      ? await this.thirdPartyService.findById(integration.thirdPartyOauthId)
-      : null
-    const tokens = this.toStoredTokens(response, previous ? this.readTokens(previous) : undefined)
+    // e.g. a permission unticked on the consent screen
+    if (requested.some(scope => !granted.includes(scope))) {
+      throw new OAuth2TokenError(`${provider.name} didn't grant all the access ${app.name} needs`)
+    }
+
+    const existing = await this.connectionService.findAccount(form.teamId, provider.id, account.id)
+    const tokens = this.toStoredTokens(response, existing ? this.readTokens(existing) : undefined)
 
     // An expiring token that can't be refreshed would look connected, then
     // stop working within the hour
@@ -216,102 +249,237 @@ export class IntegrationAuthService {
       throw new OAuth2TokenError(`${provider.name} did not return a refresh token`)
     }
 
-    const integrationId =
-      integration?.id ??
-      (await this.integrationService.create({
-        formId,
+    const fields = {
+      accountEmail: account.email,
+      accountName: account.name,
+      scopes: [...new Set([...(existing?.scopes ?? []), ...granted])],
+      tokens: this.encryptTokens(tokens)
+    }
+    let connectionId = existing?.id
+
+    if (!connectionId) {
+      try {
+        connectionId = await this.connectionService.create({
+          teamId: form.teamId,
+          provider: provider.id,
+          accountId: account.id,
+          createdBy: userId,
+          ...fields
+        })
+      } catch (err: any) {
+        // Someone else in the team connected the same account at that moment
+        if (err?.code !== 11000) {
+          throw err
+        }
+      }
+    }
+
+    if (!connectionId) {
+      connectionId = (await this.connectionService.findAccount(
+        form.teamId,
+        provider.id,
+        account.id
+      ))!.id
+      await this.connectionService.reconnect(connectionId, fields)
+    } else if (existing) {
+      // The same account connected again: new tokens, and active again
+      await this.connectionService.reconnect(connectionId, fields)
+    }
+
+    const integration = await this.integrationService.findOne(form.id, app.id)
+
+    if (integration) {
+      await this.integrationService.update(integration.id, { connectionId })
+    } else {
+      await this.integrationService.create({
+        formId: form.id,
         appId: app.id,
         config: {},
-        status: IntegrationStatusEnum.PENDING
-      }))
-    const scope = app.auth.type === 'oauth2' ? app.auth.scopes.join(' ') : ''
-
-    // One connection per integration, so deleting the integration or another
-    // form's connection never affects this one
-    const thirdPartyOauthId = await this.thirdPartyService.createOrUpdate(
-      app.id,
-      integrationId,
-      scope,
-      { tokens: this.encryptTokens(tokens) }
-    )
-
-    // Not revoked at the provider: when the same account reconnects, the new
-    // tokens belong to the same grant, and providers like Google revoke the
-    // whole grant, which would disconnect the account again
-    if (previous && previous.id !== thirdPartyOauthId) {
-      await this.thirdPartyService.delete(previous.id)
+        status: IntegrationStatusEnum.PENDING,
+        connectionId
+      })
     }
 
-    const updates: Partial<IntegrationModel> = { thirdPartyOauthId }
+    await this.resumeConnection(connectionId!)
 
-    if (integration?.status === IntegrationStatusEnum.NEEDS_RECONNECT) {
-      updates.status = this.hasConfig(integration)
-        ? IntegrationStatusEnum.ACTIVE
-        : IntegrationStatusEnum.PENDING
-    }
-
-    await this.integrationService.update(integrationId, updates)
-
-    // Send what arrived while the account needed reconnecting
-    if (integration && (updates.status ?? integration.status) === IntegrationStatusEnum.ACTIVE) {
-      await this.integrationService.resendWaiting(integration)
-    }
+    return connectionId!
   }
 
   /**
-   * Drops the integration's connection: revokes its tokens at the provider,
-   * best effort, then deletes them.
+   * After an account is connected (again): integrations using it that were
+   * waiting for a reconnect become active, and every active one sends the
+   * submissions that waited.
    */
-  async disconnect(integration: IntegrationModel): Promise<void> {
-    if (!integration.thirdPartyOauthId) {
-      return
+  async resumeConnection(connectionId: string): Promise<void> {
+    const integrations = await this.integrationService.findAllByConnection(connectionId)
+
+    for (const integration of integrations) {
+      let status = integration.status
+
+      if (status === IntegrationStatusEnum.NEEDS_RECONNECT) {
+        status = this.hasConfig(integration)
+          ? IntegrationStatusEnum.ACTIVE
+          : IntegrationStatusEnum.PENDING
+        await this.integrationService.update(integration.id, { status })
+      }
+
+      if (status === IntegrationStatusEnum.ACTIVE) {
+        await this.integrationService.resendWaiting(integration)
+      }
+    }
+  }
+
+  // The account behind an access token, from the provider's userinfo endpoint
+  private async fetchAccount(
+    provider: ConfiguredOAuth2Provider,
+    accessToken: string
+  ): Promise<ConnectedAccount> {
+    let response: { statusCode: number; body: any }
+
+    try {
+      response = await got.get(provider.userInfoUrl, {
+        headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
+        responseType: 'json',
+        throwHttpErrors: false,
+        followRedirect: false,
+        retry: { limit: 0 },
+        timeout: TOKEN_REQUEST_TIMEOUT
+      })
+    } catch (err: any) {
+      // got's errors carry the request headers, which include the token
+      throw new OAuth2TokenError(
+        `${provider.name} userinfo request failed: ${err?.code || 'network error'}`
+      )
     }
 
-    const app = this.appService.findById(integration.appId)
-    const provider = app ? this.appService.findOAuth2Provider(app) : undefined
-    const record = await this.thirdPartyService.findById(integration.thirdPartyOauthId)
-    const tokens = record ? this.readTokens(record) : undefined
+    const body = response.body
+
+    if (
+      response.statusCode < 200 ||
+      response.statusCode >= 300 ||
+      typeof body?.sub !== 'string' ||
+      !body.sub
+    ) {
+      throw new OAuth2TokenError(
+        `${provider.name} didn't identify the account: HTTP ${response.statusCode}`
+      )
+    }
+
+    return {
+      id: body.sub,
+      email: typeof body.email === 'string' ? body.email : undefined,
+      name: typeof body.name === 'string' ? body.name : undefined
+    }
+  }
+
+  // --- Team connections ---------------------------------------------------------
+
+  // Whether the account has granted everything the app asks for
+  coversScopes(app: AppDefinition, connection: IntegrationConnectionModel): boolean {
+    const requested = app.auth.type === 'oauth2' ? app.auth.scopes : []
+    return requested.every(scope => (connection.scopes ?? []).includes(scope))
+  }
+
+  // The team's connections the app's provider can use
+  async findTeamConnections(
+    app: AppDefinition,
+    teamId: string
+  ): Promise<IntegrationConnectionModel[]> {
+    const provider = this.requireProvider(app)
+    return this.connectionService.findAllInTeam(teamId, provider.id)
+  }
+
+  /**
+   * A connection of the team that the app can deliver with. Throws a
+   * BadRequestException for another team's or provider's connection, or one
+   * that hasn't granted the app's scopes.
+   */
+  async findUsableConnection(
+    app: AppDefinition,
+    teamId: string,
+    connectionId?: string
+  ): Promise<IntegrationConnectionModel> {
+    const provider = this.requireProvider(app)
+    const connection = connectionId ? await this.connectionService.findById(connectionId) : null
+
+    if (!connection || connection.teamId !== teamId || connection.provider !== provider.id) {
+      throw new BadRequestException(`Connect your ${provider.name} account first`)
+    }
+
+    if (!this.coversScopes(app, connection)) {
+      throw new BadRequestException(
+        `Connect the ${provider.name} account again to give ${app.name} access`
+      )
+    }
+
+    return connection
+  }
+
+  /**
+   * Disconnects a team's account: revokes the grant at the provider (best
+   * effort) and deletes the tokens. Integrations using it need reconnecting,
+   * and their submissions wait until another account is picked or this one is
+   * connected again. Only the member who connected it or the team owner can.
+   */
+  async disconnectConnection(
+    connection: IntegrationConnectionModel,
+    userId: string,
+    team: { id: string; ownerId: string }
+  ): Promise<void> {
+    if (connection.teamId !== team.id) {
+      throw new BadRequestException('The account does not exist')
+    }
+
+    if (connection.createdBy !== userId && team.ownerId !== userId) {
+      throw new ForbiddenException(
+        'Only the member who connected the account or the workspace owner can disconnect it'
+      )
+    }
+
+    const provider = this.appService.findProvider(connection.provider)
+    const tokens = this.readTokens(connection)
     const token = tokens?.refreshToken || tokens?.accessToken
 
-    if (!provider?.revokeUrl || !token) {
-      await this.thirdPartyService.delete(integration.thirdPartyOauthId)
-      return
-    }
-
-    // Providers like Google revoke the whole grant, which other connections
-    // on this server may share if they're for the same account. Accounts
-    // aren't known, so the grant is only revoked with the last connection.
-    // Checking and deleting under one lock means two deletes at once can't
-    // each leave the grant to the other.
+    // Providers like Google revoke the whole grant, i.e. every token this
+    // server holds for the account, so not while another workspace has the
+    // account connected. Checking and deleting under one lock means two
+    // disconnects at once can't each leave the grant to the other.
     const isLast = await this.redisService.withLock(
-      `integration_revoke:${provider.id}`,
+      `integration_revoke:${connection.provider}:${connection.accountId}`,
       REVOKE_LOCK_TTL,
       async () => {
-        const shared = await this.thirdPartyService.existsForApps(
-          this.appIdsOf(provider.id),
-          integration.thirdPartyOauthId!
+        const shared = await this.connectionService.accountConnectedElsewhere(
+          connection.provider,
+          connection.accountId,
+          connection.id
         )
-        await this.thirdPartyService.delete(integration.thirdPartyOauthId!)
+        await this.connectionService.delete(connection.id)
         return !shared
       }
     )
 
+    await this.integrationService.detachConnection(connection.id)
+
+    if (!provider?.revokeUrl || !token) {
+      return
+    }
+
     if (isLast) {
-      await this.revoke(provider, integration, token, !!tokens!.refreshToken)
+      await this.revoke(provider, connection, token, !!tokens!.refreshToken)
     } else {
       this.logger.info(
-        `Not revoking the ${provider.name} grant of integration ${integration.id}: other connections may share it`
+        `Not revoking the ${provider.name} grant of connection ${connection.id}: another workspace has the account connected`
       )
     }
   }
 
   /**
-   * Revokes a grant at the provider (RFC 7009). Never throws: a failed
-   * request leaves the grant for the account owner to remove.
+   * Revokes a grant at the provider (RFC 7009). Never throws: a failed request
+   * leaves the grant for the account owner to remove.
    */
   private async revoke(
     provider: ConfiguredOAuth2Provider,
-    integration: IntegrationModel,
+    connection: IntegrationConnectionModel,
     token: string,
     isRefreshToken: boolean
   ) {
@@ -331,22 +499,15 @@ export class IntegrationAuthService {
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         this.logger.warn(
-          `${provider.name} didn't revoke the grant of integration ${integration.id}: HTTP ${response.statusCode}`
+          `${provider.name} didn't revoke the grant of connection ${connection.id}: HTTP ${response.statusCode}`
         )
       }
     } catch (err: any) {
       // got's errors carry the request body, which includes the token
       this.logger.warn(
-        `Revoking the ${provider.name} grant of integration ${integration.id} failed: ${err?.code || 'network error'}`
+        `Revoking the ${provider.name} grant of connection ${connection.id} failed: ${err?.code || 'network error'}`
       )
     }
-  }
-
-  private appIdsOf(providerId: string): string[] {
-    return this.appService
-      .findAll()
-      .filter(app => app.auth.type === 'oauth2' && app.auth.provider === providerId)
-      .map(app => app.id)
   }
 
   // --- Credentials for run() --------------------------------------------------
@@ -387,8 +548,9 @@ export class IntegrationAuthService {
   }
 
   /**
-   * Returns a valid access token, refreshing it first if it has expired.
-   * If the provider rejects the refresh token, the integration is marked as
+   * Returns a valid access token for the integration's connection, refreshing
+   * it first if it has expired. If the provider rejects the refresh token,
+   * the connection and every active integration using it are marked as
    * needing reconnection.
    */
   async getAccessToken(app: AppDefinition, integration: IntegrationModel): Promise<string> {
@@ -398,18 +560,68 @@ export class IntegrationAuthService {
       throw new IntegrationAuthError(`${app.name} is not configured on this server`)
     }
 
-    const record = integration.thirdPartyOauthId
-      ? await this.thirdPartyService.findById(integration.thirdPartyOauthId)
+    const connection = integration.connectionId
+      ? await this.connectionService.findById(integration.connectionId)
       : null
 
-    if (!record) {
+    if (!connection) {
       return this.needsReconnect(integration, `No ${provider.name} account is connected`)
     }
 
-    const tokens = this.readTokens(record)
+    if (connection.status === IntegrationConnectionStatusEnum.NEEDS_RECONNECT) {
+      return this.needsReconnect(
+        integration,
+        connection.statusReason || `The ${provider.name} account needs reconnecting`
+      )
+    }
+
+    return this.getConnectionAccessToken(provider, connection)
+  }
+
+  /**
+   * A valid access token for the connection. Only one refresh runs per
+   * connection: a job that finds the token expired while another job is
+   * refreshing it waits, then uses the new token.
+   */
+  async getConnectionAccessToken(
+    provider: ConfiguredOAuth2Provider,
+    connection: IntegrationConnectionModel
+  ): Promise<string> {
+    const tokens = this.readTokens(connection)
+
+    if (tokens?.accessToken && !this.isExpired(tokens)) {
+      return tokens.accessToken
+    }
+
+    return this.redisService.withLock(
+      `integration_connection_refresh:${connection.id}`,
+      REFRESH_LOCK_TTL,
+      () => this.refresh(provider, connection.id),
+      REFRESH_LOCK_RETRIES,
+      REFRESH_LOCK_RETRY_DELAY
+    )
+  }
+
+  // Runs under the connection's refresh lock
+  private async refresh(provider: ConfiguredOAuth2Provider, connectionId: string): Promise<string> {
+    // Read again: the refresh this job waited for may have done it already
+    const connection = await this.connectionService.findById(connectionId)
+
+    if (!connection) {
+      throw new IntegrationAuthError(`The ${provider.name} account was disconnected`, true)
+    }
+
+    if (connection.status === IntegrationConnectionStatusEnum.NEEDS_RECONNECT) {
+      throw new IntegrationAuthError(
+        `${connection.statusReason || `The ${provider.name} account needs reconnecting`}. Reconnect the account to resume deliveries.`,
+        true
+      )
+    }
+
+    const tokens = this.readTokens(connection)
 
     if (!tokens) {
-      return this.needsReconnect(integration, `The ${provider.name} tokens cannot be read`)
+      return this.connectionNeedsReconnect(connection, `The ${provider.name} tokens cannot be read`)
     }
 
     if (tokens.accessToken && !this.isExpired(tokens)) {
@@ -417,7 +629,10 @@ export class IntegrationAuthService {
     }
 
     if (!tokens.refreshToken) {
-      return this.needsReconnect(integration, `The ${provider.name} access token has expired`)
+      return this.connectionNeedsReconnect(
+        connection,
+        `The ${provider.name} access token has expired`
+      )
     }
 
     let response: OAuth2TokenResponse
@@ -429,20 +644,21 @@ export class IntegrationAuthService {
       })
     } catch (err) {
       if (err instanceof OAuth2TokenError && err.code === 'invalid_grant') {
-        // A concurrent job may have refreshed first and rotated the refresh
-        // token we used; if so, its access token is good
-        const latest = await this.thirdPartyService.findById(record.id)
+        // The account may have been connected again while this ran (the lock
+        // only covers refreshes); if so, its new token is good
+        const latest = await this.connectionService.findById(connection.id)
         const latestTokens = latest ? this.readTokens(latest) : undefined
 
         if (
+          latest &&
+          latest.tokenVersion !== connection.tokenVersion &&
           latestTokens?.accessToken &&
-          latestTokens.refreshToken !== tokens.refreshToken &&
           !this.isExpired(latestTokens)
         ) {
           return latestTokens.accessToken
         }
 
-        return this.needsReconnect(integration, err.message)
+        return this.connectionNeedsReconnect(connection, err.message)
       }
 
       if (err instanceof OAuth2TokenError && err.code === 'invalid_client') {
@@ -454,9 +670,38 @@ export class IntegrationAuthService {
     }
 
     const refreshed = this.toStoredTokens(response, tokens)
-    await this.thirdPartyService.update(record.id, { tokens: this.encryptTokens(refreshed) })
+
+    // Not stored if the account was connected again meanwhile; this token is
+    // still valid for this job
+    await this.connectionService.updateTokens(
+      connection.id,
+      connection.tokenVersion,
+      this.encryptTokens(refreshed)
+    )
 
     return refreshed.accessToken!
+  }
+
+  /**
+   * Marks the connection and its active integrations as needing reconnection,
+   * unless the account was connected again since its tokens were read.
+   */
+  private async connectionNeedsReconnect(
+    connection: IntegrationConnectionModel,
+    reason: string
+  ): Promise<never> {
+    if (
+      await this.connectionService.markNeedsReconnect(
+        connection.id,
+        connection.tokenVersion,
+        reason
+      )
+    ) {
+      await this.integrationService.markConnectionNeedsReconnect(connection.id)
+      this.logger.warn(`Connection ${connection.id} needs reconnecting: ${reason}`)
+    }
+
+    throw new IntegrationAuthError(`${reason}. Reconnect the account to resume deliveries.`, true)
   }
 
   private async needsReconnect(
@@ -512,7 +757,7 @@ export class IntegrationAuthService {
   }
 
   // Undefined when the tokens can't be decrypted, e.g. after the key changed
-  private readTokens(record: ThirdPartyOauthModel): StoredTokens | undefined {
+  private readTokens(record: IntegrationConnectionModel): StoredTokens | undefined {
     const stored = mapToObject(record.tokens) ?? {}
 
     try {

@@ -34,11 +34,13 @@ export class AppService {
   }
 
   findOAuth2Provider(app: AppDefinition): ConfiguredOAuth2Provider | undefined {
-    if (app.auth.type !== 'oauth2') {
-      return
+    if (app.auth.type === 'oauth2') {
+      return this.findProvider(app.auth.provider)
     }
+  }
 
-    const providerId = app.auth.provider
+  // A provider with its client credentials, if they're set
+  findProvider(providerId: string): ConfiguredOAuth2Provider | undefined {
     const provider = Object.prototype.hasOwnProperty.call(this.providers, providerId)
       ? this.providers[providerId]
       : undefined

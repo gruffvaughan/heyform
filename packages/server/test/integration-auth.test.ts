@@ -11,7 +11,7 @@ process.env.APP_HOMEPAGE_URL = 'https://heyform.example.com'
 process.env.FAKE_INTEGRATION_CLIENT_ID = 'fake-client-id'
 process.env.FAKE_INTEGRATION_CLIENT_SECRET = 'fake-client-secret'
 
-const { BadRequestException } = require('@nestjs/common')
+const { BadRequestException, ForbiddenException } = require('@nestjs/common')
 const { defineApp } = require('../src/apps/types')
 const { AppService } = require('../src/service/app.service')
 const { IntegrationService, getAppJobOptions } = require('../src/service/integration.service')
@@ -33,18 +33,31 @@ const {
 const {
   UpdateIntegrationStatusResolver
 } = require('../src/resolver/integration/update-integration-status.resolver')
+const {
+  IntegrationConnectionsResolver
+} = require('../src/resolver/integration/integration-connections.resolver')
+const {
+  TeamIntegrationConnectionsResolver
+} = require('../src/resolver/integration/team-integration-connections.resolver')
+const {
+  DisconnectIntegrationConnectionResolver
+} = require('../src/resolver/integration/disconnect-integration-connection.resolver')
 const { IntegrationOAuthController } = require('../src/controller/integration-oauth.controller')
 const { decryptSecret, encryptSecret } = require('../src/utils/crypto')
 const { IntegrationStatusEnum } = require('../src/model/integration.model')
+const { IntegrationConnectionStatusEnum } = require('../src/model/integration-connection.model')
 const webhook = require('../src/apps/webhook').default
 
 const NEEDS_RECONNECT = IntegrationStatusEnum.NEEDS_RECONNECT
+const CONNECTION_ACTIVE = IntegrationConnectionStatusEnum.ACTIVE
+const CONNECTION_NEEDS_RECONNECT = IntegrationConnectionStatusEnum.NEEDS_RECONNECT
 
 // --- fake OAuth2 provider ---------------------------------------------------
 
-interface TokenRequest {
+interface ProviderRequest {
   path: string
   params: Record<string, string>
+  authorization?: string
 }
 
 type TokenHandler = (
@@ -52,18 +65,21 @@ type TokenHandler = (
   path: string
 ) => { status: number; body: unknown }
 
+const ACCOUNT = { sub: 'account-1', email: 'owner@example.com', name: 'Owner' }
+
 class FakeProvider {
-  requests: TokenRequest[] = []
+  requests: ProviderRequest[] = []
   handler: TokenHandler = () => ({ status: 500, body: {} })
+  userInfo: () => { status: number; body: unknown } = () => ({ status: 200, body: ACCOUNT })
   private server = http.createServer((req, res) => {
     let raw = ''
     req.on('data', chunk => (raw += chunk))
     req.on('end', () => {
       const params = Object.fromEntries(new URLSearchParams(raw))
       const path = req.url ?? ''
-      this.requests.push({ path, params })
+      this.requests.push({ path, params, authorization: req.headers.authorization })
 
-      const { status, body } = this.handler(params, path)
+      const { status, body } = path === '/userinfo' ? this.userInfo() : this.handler(params, path)
       res.writeHead(status, { 'content-type': 'application/json' })
       res.end(JSON.stringify(body))
     })
@@ -77,20 +93,27 @@ class FakeProvider {
     await new Promise(resolve => this.server.close(resolve))
   }
 
+  private url(path: string): string {
+    return `http://127.0.0.1:${(this.server.address() as AddressInfo).port}${path}`
+  }
+
   get tokenUrl(): string {
-    return `http://127.0.0.1:${(this.server.address() as AddressInfo).port}/token`
+    return this.url('/token')
   }
 
   get revokeUrl(): string {
-    return `http://127.0.0.1:${(this.server.address() as AddressInfo).port}/revoke`
+    return this.url('/revoke')
   }
 
-  // Requests made to the token endpoint
-  get tokenRequests(): TokenRequest[] {
+  get userInfoUrl(): string {
+    return this.url('/userinfo')
+  }
+
+  get tokenRequests(): ProviderRequest[] {
     return this.requests.filter(r => r.path === '/token')
   }
 
-  get revokeRequests(): TokenRequest[] {
+  get revokeRequests(): ProviderRequest[] {
     return this.requests.filter(r => r.path === '/revoke')
   }
 }
@@ -102,13 +125,15 @@ const provider = new FakeProvider()
 function createStores() {
   let nextId = 1
   const integrations = new Map<string, any>()
-  const oauthRecords = new Map<string, any>()
+  const connections = new Map<string, any>()
   const redis = new Map<string, string>()
-  const lockQueues = new Map<string, Promise<unknown>>()
   // Integrations whose waiting submissions were resent
   const resent: string[] = []
   // Submissions kept waiting for a reconnect
   const held: any[] = []
+  // Keys locked with withLock, in order
+  const locks: string[] = []
+  const lockQueues = new Map<string, Promise<unknown>>()
 
   const integrationService = {
     findById: async (id: string) => integrations.get(id) ?? null,
@@ -116,6 +141,10 @@ function createStores() {
       [...integrations.values()].find(i => i.formId === formId && i.appId === appId) ?? null,
     findAllInForm: async (formId: string) =>
       [...integrations.values()].filter(i => i.formId === formId),
+    findAllByConnection: async (connectionId: string) =>
+      [...integrations.values()].filter(i => i.connectionId === connectionId),
+    findAllByConnections: async (ids: string[]) =>
+      [...integrations.values()].filter(i => ids.includes(i.connectionId)),
     create: async (data: any) => {
       const id = `integration_${nextId++}`
       integrations.set(id, { ...data, id })
@@ -135,6 +164,21 @@ function createStores() {
 
       return integrationService.create({ formId, appId, ...updates })
     },
+    markConnectionNeedsReconnect: async (connectionId: string) => {
+      for (const i of integrations.values()) {
+        if (i.connectionId === connectionId && i.status === IntegrationStatusEnum.ACTIVE) {
+          i.status = NEEDS_RECONNECT
+        }
+      }
+    },
+    detachConnection: async (connectionId: string) => {
+      await integrationService.markConnectionNeedsReconnect(connectionId)
+      for (const i of integrations.values()) {
+        if (i.connectionId === connectionId) {
+          delete i.connectionId
+        }
+      }
+    },
     countWaiting: async () => 0,
     holdForReconnect: async (input: any) => {
       held.push(input)
@@ -146,23 +190,66 @@ function createStores() {
     }
   }
 
-  const thirdPartyService = {
-    findById: async (id: string) => oauthRecords.get(id) ?? null,
-    createOrUpdate: async (appId: string, openId: string, scope: string, updates: any) => {
-      const existing = [...oauthRecords.values()].find(
-        r => r.appId === appId && r.openId === openId && r.scope === scope
-      )
-      const id = existing?.id ?? `oauth_${nextId++}`
-      oauthRecords.set(id, { ...existing, appId, openId, scope, ...updates, id })
+  // Copies, like documents read from MongoDB
+  const read = (connection: any) =>
+    connection ? { ...connection, tokens: { ...connection.tokens } } : null
+
+  const connectionService = {
+    findById: async (id: string) => read(connections.get(id)),
+    findAccount: async (teamId: string, providerId: string, accountId: string) =>
+      read(
+        [...connections.values()].find(
+          c => c.teamId === teamId && c.provider === providerId && c.accountId === accountId
+        )
+      ),
+    findAllInTeam: async (teamId: string, providerId?: string) =>
+      [...connections.values()]
+        .filter(c => c.teamId === teamId && (!providerId || c.provider === providerId))
+        .map(read),
+    create: async (data: any) => {
+      const id = `connection_${nextId++}`
+      connections.set(id, {
+        tokenVersion: 0,
+        status: CONNECTION_ACTIVE,
+        scopes: [],
+        ...data,
+        id
+      })
       return id
     },
-    update: async (id: string, updates: any) => {
-      oauthRecords.set(id, { ...oauthRecords.get(id), ...updates })
+    reconnect: async (id: string, updates: any) => {
+      const connection = connections.get(id)
+      Object.assign(connection, updates, { status: CONNECTION_ACTIVE })
+      delete connection.statusReason
+      connection.tokenVersion++
+    },
+    updateTokens: async (id: string, tokenVersion: number, tokens: any) => {
+      const connection = connections.get(id)
+
+      if (!connection || connection.tokenVersion !== tokenVersion) {
+        return false
+      }
+
+      connection.tokens = tokens
+      connection.tokenVersion++
       return true
     },
-    existsForApps: async (appIds: string[], exceptId: string) =>
-      [...oauthRecords.values()].some(r => appIds.includes(r.appId) && r.id !== exceptId),
-    delete: async (id: string) => oauthRecords.delete(id)
+    markNeedsReconnect: async (id: string, tokenVersion: number, reason: string) => {
+      const connection = connections.get(id)
+
+      if (!connection || connection.tokenVersion !== tokenVersion) {
+        return false
+      }
+
+      connection.status = CONNECTION_NEEDS_RECONNECT
+      connection.statusReason = reason
+      return true
+    },
+    accountConnectedElsewhere: async (providerId: string, accountId: string, exceptId: string) =>
+      [...connections.values()].some(
+        c => c.provider === providerId && c.accountId === accountId && c.id !== exceptId
+      ),
+    delete: async (id: string) => connections.delete(id)
   }
 
   const redisService = {
@@ -177,6 +264,7 @@ function createStores() {
     },
     // Runs callbacks for the same key one after another, like the Redis lock
     withLock: async (key: string, _ttl: string, callback: () => Promise<any>) => {
+      locks.push(key)
       const previous = lockQueues.get(key) ?? Promise.resolve()
       const run = previous.catch(() => undefined).then(callback)
       lockQueues.set(key, run)
@@ -186,12 +274,13 @@ function createStores() {
 
   return {
     integrations,
-    oauthRecords,
+    connections,
     redis,
     resent,
     held,
+    locks,
     integrationService,
-    thirdPartyService,
+    connectionService,
     redisService
   }
 }
@@ -225,6 +314,8 @@ function createAppService(apps: AppDefinition[] = [oauthApp, apiKeyApp, webhook]
       name: 'Fake',
       authorizeUrl: 'https://auth.fake.example/authorize',
       tokenUrl: provider.tokenUrl,
+      userInfoUrl: provider.userInfoUrl,
+      identityScopes: ['openid', 'email'],
       revokeUrl: provider.revokeUrl,
       authorizeParams: { access_type: 'offline' },
       pkce: true
@@ -233,7 +324,9 @@ function createAppService(apps: AppDefinition[] = [oauthApp, apiKeyApp, webhook]
       id: 'unconfigured',
       name: 'Unconfigured',
       authorizeUrl: 'https://auth.unconfigured.example/authorize',
-      tokenUrl: provider.tokenUrl
+      tokenUrl: provider.tokenUrl,
+      userInfoUrl: provider.userInfoUrl,
+      identityScopes: ['openid']
     }
   }
 
@@ -246,45 +339,65 @@ function createAuth() {
   const service = new IntegrationAuthService(
     appService,
     stores.integrationService,
-    stores.thirdPartyService,
+    stores.connectionService,
     stores.redisService
   )
 
   return { ...stores, appService, service }
 }
 
-// Stores an oauth connection as completeAuthorization would
+const FORM = { id: 'form_1', teamId: 'team_1' }
+
+function encryptTokens(tokens: {
+  accessToken?: string
+  refreshToken?: string
+  expiresAt?: number
+}) {
+  const key = process.env.FORM_ENCRYPTION_KEY!
+
+  return {
+    accessToken: tokens.accessToken ? encryptSecret(tokens.accessToken, key) : undefined,
+    refreshToken: tokens.refreshToken ? encryptSecret(tokens.refreshToken, key) : undefined,
+    expiresAt: tokens.expiresAt
+  }
+}
+
+// Stores a team connection and an integration using it, as connecting would
 async function connect(
   ctx: ReturnType<typeof createAuth>,
   tokens: { accessToken?: string; refreshToken?: string; expiresAt?: number },
   integration: Record<string, any> = {},
-  openId = 'x'
+  connection: Record<string, any> = {}
 ) {
-  const oauthId = await ctx.thirdPartyService.createOrUpdate('fakeapp', openId, 'rows.read', {
-    tokens: {
-      accessToken: tokens.accessToken
-        ? encryptSecret(tokens.accessToken, process.env.FORM_ENCRYPTION_KEY)
-        : undefined,
-      refreshToken: tokens.refreshToken
-        ? encryptSecret(tokens.refreshToken, process.env.FORM_ENCRYPTION_KEY)
-        : undefined,
-      expiresAt: tokens.expiresAt
-    }
+  const connectionId = await ctx.connectionService.create({
+    teamId: 'team_1',
+    provider: 'fake',
+    accountId: 'account-1',
+    accountEmail: 'owner@example.com',
+    scopes: ['openid', 'email', 'rows.read', 'rows.write'],
+    createdBy: 'user_1',
+    tokens: encryptTokens(tokens),
+    ...connection
   })
   const integrationId = await ctx.integrationService.create({
     formId: 'form_1',
     appId: 'fakeapp',
     config: { sheet: 'Leads' },
     status: IntegrationStatusEnum.ACTIVE,
-    thirdPartyOauthId: oauthId,
+    connectionId,
     ...integration
   })
 
-  return { oauthId, integrationId, integration: ctx.integrations.get(integrationId) }
+  return {
+    connectionId,
+    integrationId,
+    integration: ctx.integrations.get(integrationId),
+    connection: ctx.connections.get(connectionId)
+  }
 }
 
-function storedTokens(ctx: ReturnType<typeof createAuth>, oauthId: string) {
-  const tokens = ctx.oauthRecords.get(oauthId).tokens
+function storedTokens(ctx: ReturnType<typeof createAuth>, connectionId: string) {
+  const tokens = ctx.connections.get(connectionId).tokens
   const key = process.env.FORM_ENCRYPTION_KEY!
 
   return {
@@ -490,6 +603,7 @@ async function testApiKeyIsStoredEncryptedAndNeverReturned() {
     config: { list: 'a' },
     status: IntegrationStatusEnum.ACTIVE,
     connected: false,
+    connectionId: undefined,
     apiKeyHint: '••••WXYZ',
     waitingCount: 0
   })
@@ -581,7 +695,8 @@ async function testAuthorizeUrlAndState() {
     'https://heyform.example.com/api/integrations/oauth/callback'
   )
   assert.strictEqual(parsed.searchParams.get('response_type'), 'code')
-  assert.strictEqual(parsed.searchParams.get('scope'), 'rows.read rows.write')
+  // The identity scopes come first, so the account can be identified
+  assert.strictEqual(parsed.searchParams.get('scope'), 'openid email rows.read rows.write')
   assert.strictEqual(parsed.searchParams.get('state'), state)
   assert.strictEqual(parsed.searchParams.get('access_type'), 'offline')
   assert.ok(!url.includes('fake-client-secret'), 'the client secret stays on the server')
@@ -610,17 +725,16 @@ async function testAuthorizeUrlAndState() {
 
 async function testStateIsBoundToUserAndSingleUse() {
   const ctx = createAuth()
-  const first = await ctx.service.createAuthorization(oauthApp, 'form_1', 'user_1')
+  const { state } = await ctx.service.createAuthorization(oauthApp, 'form_1', 'user_1')
 
-  await assertBadRequest(
-    ctx.service.consumeAuthorization(first.state, 'user_2'),
-    /Invalid OAuth state/
-  )
+  await assertBadRequest(ctx.service.consumeAuthorization(state, 'user_2'), /Invalid OAuth state/)
+
+  // The failed attempt consumed it too, so a stolen state can't be retried
+  await assertBadRequest(ctx.service.consumeAuthorization(state, 'user_1'), /Invalid OAuth state/)
 
   const second = await ctx.service.createAuthorization(oauthApp, 'form_1', 'user_1')
-  const pending = await ctx.service.consumeAuthorization(second.state, 'user_1')
-  assert.strictEqual(pending.formId, 'form_1')
-
+  const data = await ctx.service.consumeAuthorization(second.state, 'user_1')
+  assert.strictEqual(data.formId, 'form_1')
   await assertBadRequest(
     ctx.service.consumeAuthorization(second.state, 'user_1'),
     /Invalid OAuth state/
@@ -628,15 +742,32 @@ async function testStateIsBoundToUserAndSingleUse() {
   await assertBadRequest(ctx.service.consumeAuthorization('', 'user_1'), /Invalid OAuth state/)
 }
 
-async function testCompleteAuthorizationStoresEncryptedTokens() {
-  const ctx = createAuth()
-  provider.requests = []
+function grantTokens(extra: Record<string, unknown> = {}) {
   provider.handler = () => ({
     status: 200,
-    body: { access_token: 'access-1', refresh_token: 'refresh-1', expires_in: 3600 }
+    body: {
+      access_token: 'access-1',
+      refresh_token: 'refresh-1',
+      expires_in: 3600,
+      scope: 'openid email rows.read rows.write',
+      ...extra
+    }
   })
+}
 
-  await ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-1', 'verifier-1')
+async function testConnectingCreatesATeamConnection() {
+  const ctx = createAuth()
+  provider.requests = []
+  provider.userInfo = () => ({ status: 200, body: ACCOUNT })
+  grantTokens()
+
+  const connectionId = await ctx.service.completeAuthorization(
+    oauthApp,
+    FORM,
+    'user_1',
+    'code-1',
+    'verifier-1'
+  )
 
   assert.deepStrictEqual(provider.tokenRequests[0].params, {
     grant_type: 'authorization_code',
@@ -646,100 +777,308 @@ async function testCompleteAuthorizationStoresEncryptedTokens() {
     client_id: 'fake-client-id',
     client_secret: 'fake-client-secret'
   })
+  // The account is identified with the new access token
+  assert.deepStrictEqual(
+    provider.requests.filter(r => r.path === '/userinfo').map(r => r.authorization),
+    ['Bearer access-1']
+  )
 
-  const [integration] = ctx.integrations.values()
-  assert.strictEqual(integration.status, IntegrationStatusEnum.PENDING, 'not active until saved')
-  assert.deepStrictEqual(ctx.resent, [], 'nothing to send until it is active')
-  assert.ok(integration.thirdPartyOauthId)
+  const connection = ctx.connections.get(connectionId)
+  assert.deepStrictEqual(
+    {
+      teamId: connection.teamId,
+      provider: connection.provider,
+      accountId: connection.accountId,
+      accountEmail: connection.accountEmail,
+      accountName: connection.accountName,
+      createdBy: connection.createdBy,
+      scopes: connection.scopes,
+      status: connection.status
+    },
+    {
+      teamId: 'team_1',
+      provider: 'fake',
+      accountId: 'account-1',
+      accountEmail: 'owner@example.com',
+      accountName: 'Owner',
+      createdBy: 'user_1',
+      scopes: ['openid', 'email', 'rows.read', 'rows.write'],
+      status: CONNECTION_ACTIVE
+    }
+  )
+  assert.ok(!JSON.stringify(connection).includes('access-1'), 'stored encrypted')
+  assert.ok(!JSON.stringify(connection).includes('refresh-1'))
 
-  const record = ctx.oauthRecords.get(integration.thirdPartyOauthId)
-  assert.strictEqual(record.openId, integration.id)
-  assert.strictEqual(record.scope, 'rows.read rows.write')
-  assert.ok(!JSON.stringify(record).includes('access-1'))
-  assert.ok(!JSON.stringify(record).includes('refresh-1'))
-
-  const tokens = storedTokens(ctx, integration.thirdPartyOauthId)
+  const tokens = storedTokens(ctx, connectionId)
   assert.strictEqual(tokens.accessToken, 'access-1')
   assert.strictEqual(tokens.refreshToken, 'refresh-1')
   assert.ok(Math.abs(tokens.expiresAt - (Date.now() + 3600_000)) < 5000)
+
+  // The form's integration uses it, pending until its settings are saved
+  const [integration] = ctx.integrations.values()
+  assert.strictEqual(integration.connectionId, connectionId)
+  assert.strictEqual(integration.status, IntegrationStatusEnum.PENDING)
+  assert.deepStrictEqual(ctx.resent, [], 'nothing to send until it is active')
 
   const [listed] = await new FormIntegrationsResolver(ctx.integrationService).formIntegrations({
     formId: 'form_1'
   })
   assert.strictEqual(listed.connected, true)
-  assert.ok(!JSON.stringify(listed).includes(integration.thirdPartyOauthId))
+  assert.strictEqual(listed.connectionId, connectionId)
+  assert.ok(!JSON.stringify(listed).includes('access-1'))
 }
 
-async function testRejectsExpiringTokenWithoutRefreshToken() {
+async function testRejectsConnectionsThatCantBeUsed() {
   const ctx = createAuth()
-  provider.handler = () => ({ status: 200, body: { access_token: 'a', expires_in: 3600 } })
 
+  // An expiring token without a refresh token
+  provider.handler = () => ({
+    status: 200,
+    body: { access_token: 'a', expires_in: 3600, scope: 'openid email rows.read rows.write' }
+  })
   await assert.rejects(
-    ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-1'),
+    ctx.service.completeAuthorization(oauthApp, FORM, 'user_1', 'code-1'),
     (error: any) =>
       error instanceof OAuth2TokenError && /did not return a refresh token/.test(error.message)
   )
-  assert.strictEqual(ctx.integrations.size, 0, 'no pending integration is left behind')
-  assert.strictEqual(ctx.oauthRecords.size, 0)
+
+  // A permission left unticked on the consent screen
+  grantTokens({ scope: 'openid email rows.read' })
+  await assert.rejects(
+    ctx.service.completeAuthorization(oauthApp, FORM, 'user_1', 'code-2'),
+    /didn't grant all the access Fake App needs/
+  )
+
+  // The account can't be identified
+  grantTokens()
+  provider.userInfo = () => ({ status: 401, body: {} })
+  await assert.rejects(
+    ctx.service.completeAuthorization(oauthApp, FORM, 'user_1', 'code-3'),
+    /didn't identify the account: HTTP 401/
+  )
+  provider.userInfo = () => ({ status: 200, body: { email: 'no-sub@example.com' } })
+  await assert.rejects(
+    ctx.service.completeAuthorization(oauthApp, FORM, 'user_1', 'code-4'),
+    /didn't identify the account/
+  )
+
+  assert.strictEqual(ctx.connections.size, 0)
+  assert.strictEqual(ctx.integrations.size, 0)
+  provider.userInfo = () => ({ status: 200, body: ACCOUNT })
 
   // A token that doesn't expire needs no refresh token
   provider.handler = () => ({ status: 200, body: { access_token: 'a' } })
-  await ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-2')
-  assert.strictEqual(ctx.integrations.size, 1)
+  await ctx.service.completeAuthorization(oauthApp, FORM, 'user_1', 'code-5')
+  assert.strictEqual(ctx.connections.size, 1)
 }
 
-async function testReconnectRestoresStatusAndKeepsRefreshToken() {
+async function testSameAccountSharesOneConnection() {
   const ctx = createAuth()
-  const { oauthId, integrationId } = await connect(
+  grantTokens()
+  const first = await ctx.service.completeAuthorization(oauthApp, FORM, 'user_1', 'code-1')
+
+  // Another member connects the same account from another form; no new
+  // refresh token comes back this time
+  grantTokens({ access_token: 'access-2', refresh_token: undefined })
+  const second = await ctx.service.completeAuthorization(
+    oauthApp,
+    { id: 'form_2', teamId: 'team_1' },
+    'user_2',
+    'code-2'
+  )
+
+  assert.strictEqual(second, first, 'one connection per team and account')
+  assert.strictEqual(ctx.connections.size, 1)
+
+  const connection = ctx.connections.get(first)
+  assert.strictEqual(connection.createdBy, 'user_1', 'still shown as connected by its creator')
+  assert.strictEqual(connection.tokenVersion, 1)
+  assert.deepStrictEqual(
+    [storedTokens(ctx, first).accessToken, storedTokens(ctx, first).refreshToken],
+    ['access-2', 'refresh-1']
+  )
+  assert.deepStrictEqual(
+    [...ctx.integrations.values()].map(i => [i.formId, i.connectionId]),
+    [
+      ['form_1', first],
+      ['form_2', first]
+    ]
+  )
+
+  // Another account is another connection
+  provider.userInfo = () => ({
+    status: 200,
+    body: { sub: 'account-2', email: 'other@example.com' }
+  })
+  grantTokens()
+  const other = await ctx.service.completeAuthorization(oauthApp, FORM, 'user_1', 'code-3')
+  provider.userInfo = () => ({ status: 200, body: ACCOUNT })
+
+  assert.notStrictEqual(other, first)
+  assert.strictEqual(ctx.integrations.get('integration_2').connectionId, other, 'form_1 switches')
+
+  // The first account connected again for an app with other scopes keeps
+  // what it granted before
+  const filesApp = defineApp({
+    ...oauthApp,
+    id: 'filesapp',
+    auth: { type: 'oauth2', provider: 'fake', scopes: ['files.read'] }
+  })
+  ;(ctx.appService as any).apps.filesapp = filesApp
+  grantTokens({ scope: 'openid email files.read' })
+  await ctx.service.completeAuthorization(filesApp, FORM, 'user_1', 'code-5')
+  assert.deepStrictEqual(ctx.connections.get(first).scopes, [
+    'openid',
+    'email',
+    'rows.read',
+    'rows.write',
+    'files.read'
+  ])
+
+  // The same account in another team is that team's own connection
+  grantTokens()
+  const otherTeam = await ctx.service.completeAuthorization(
+    oauthApp,
+    { id: 'form_3', teamId: 'team_2' },
+    'user_3',
+    'code-4'
+  )
+  assert.ok(![first, other].includes(otherTeam))
+}
+
+async function testReconnectingResumesEveryIntegrationUsingIt() {
+  const ctx = createAuth()
+  const { connectionId, integrationId } = await connect(
     ctx,
     { accessToken: 'old', refreshToken: 'refresh-old', expiresAt: 1 },
-    { status: NEEDS_RECONNECT }
+    { status: NEEDS_RECONNECT },
+    {
+      status: CONNECTION_NEEDS_RECONNECT,
+      statusReason: 'Fake rejected the token request: invalid_grant'
+    }
   )
-  provider.handler = () => ({ status: 200, body: { access_token: 'access-new', expires_in: 60 } })
-
+  const otherForm = await ctx.integrationService.create({
+    formId: 'form_2',
+    appId: 'fakeapp',
+    config: { sheet: 'Other' },
+    status: NEEDS_RECONNECT,
+    connectionId
+  })
+  const disabled = await ctx.integrationService.create({
+    formId: 'form_3',
+    appId: 'fakeapp',
+    config: { sheet: 'Off' },
+    status: IntegrationStatusEnum.DISABLED,
+    connectionId
+  })
   provider.requests = []
-  await ctx.service.completeAuthorization(oauthApp, 'form_1', 'code-2')
+  grantTokens({ access_token: 'access-new', refresh_token: undefined })
 
-  const integration = ctx.integrations.get(integrationId)
-  assert.strictEqual(integration.status, IntegrationStatusEnum.ACTIVE)
-  assert.deepStrictEqual(ctx.resent, [integrationId], 'waiting submissions are sent')
-  assert.ok(!ctx.oauthRecords.has(oauthId), 'the replaced connection is deleted')
-  // The same account's new tokens share its grant, so nothing is revoked
+  await ctx.service.completeAuthorization(oauthApp, FORM, 'user_2', 'code-2')
+
+  const connection = ctx.connections.get(connectionId)
+  assert.strictEqual(connection.status, CONNECTION_ACTIVE)
+  assert.strictEqual(connection.statusReason, undefined)
+  assert.strictEqual(storedTokens(ctx, connectionId).refreshToken, 'refresh-old', 'kept')
+  assert.deepStrictEqual(
+    [integrationId, otherForm, disabled].map(id => ctx.integrations.get(id).status),
+    [IntegrationStatusEnum.ACTIVE, IntegrationStatusEnum.ACTIVE, IntegrationStatusEnum.DISABLED]
+  )
+  // Both forms send what waited
+  assert.deepStrictEqual(ctx.resent.sort(), [integrationId, otherForm].sort())
+  // The same account's new tokens share its grant: nothing revoked
   assert.deepStrictEqual(provider.revokeRequests, [])
-
-  const tokens = storedTokens(ctx, integration.thirdPartyOauthId)
-  assert.strictEqual(tokens.accessToken, 'access-new')
-  assert.strictEqual(tokens.refreshToken, 'refresh-old')
 }
 
-async function testSettingsNeedAConnectedAccount() {
+// --- picking an account -----------------------------------------------------
+
+async function testSettingsPickOneOfTheTeamsAccounts() {
   const ctx = createAuth()
   const resolver = createSettingsResolver(ctx)
+  const save = (input: Record<string, any> = {}, form = FORM) =>
+    resolver.updateIntegrationSettings(
+      { formId: 'form_1', appId: 'fakeapp', config: { sheet: 'Leads' }, ...input },
+      form
+    )
 
+  await assertBadRequest(save(), /Connect your Fake account first/)
+
+  const otherTeam = await ctx.connectionService.create({
+    teamId: 'team_2',
+    provider: 'fake',
+    accountId: 'account-9',
+    scopes: ['rows.read', 'rows.write'],
+    createdBy: 'user_9',
+    tokens: {}
+  })
+  await assertBadRequest(save({ connectionId: otherTeam }), /Connect your Fake account first/)
+
+  const otherProvider = await ctx.connectionService.create({
+    teamId: 'team_1',
+    provider: 'unconfigured',
+    accountId: 'account-1',
+    scopes: ['rows.read', 'rows.write'],
+    createdBy: 'user_1',
+    tokens: {}
+  })
+  await assertBadRequest(save({ connectionId: otherProvider }), /Connect your Fake account first/)
+
+  const readOnly = await ctx.connectionService.create({
+    teamId: 'team_1',
+    provider: 'fake',
+    accountId: 'account-2',
+    scopes: ['rows.read'],
+    createdBy: 'user_2',
+    tokens: {}
+  })
   await assertBadRequest(
-    resolver.updateIntegrationSettings({
-      formId: 'form_1',
-      appId: 'fakeapp',
-      config: { sheet: 'Leads' }
-    }),
-    /Connect your Fake account first/
+    save({ connectionId: readOnly }),
+    /Connect the Fake account again to give Fake App access/
   )
 
-  const { integrationId } = await connect(
+  // Another member's account: any member can pick it
+  const shared = await ctx.connectionService.create({
+    teamId: 'team_1',
+    provider: 'fake',
+    accountId: 'account-3',
+    scopes: ['rows.read', 'rows.write'],
+    createdBy: 'user_2',
+    tokens: {}
+  })
+  await save({ connectionId: shared })
+
+  const integration = await ctx.integrationService.findOne('form_1', 'fakeapp')
+  assert.strictEqual(integration.connectionId, shared)
+  assert.strictEqual(integration.status, IntegrationStatusEnum.ACTIVE)
+  assert.deepStrictEqual(ctx.resent, [integration.id])
+
+  // Saving again keeps the account
+  await save({ config: { sheet: 'Other' } })
+  assert.strictEqual(ctx.integrations.get(integration.id).connectionId, shared)
+}
+
+async function testPickingAnAccountThatNeedsReconnecting() {
+  const ctx = createAuth()
+  const resolver = createSettingsResolver(ctx)
+  const { connectionId, integrationId } = await connect(
     ctx,
     { accessToken: 'a', refreshToken: 'r' },
-    { status: NEEDS_RECONNECT }
+    { status: NEEDS_RECONNECT },
+    { status: CONNECTION_NEEDS_RECONNECT }
   )
-  await resolver.updateIntegrationSettings({
-    formId: 'form_1',
-    appId: 'fakeapp',
-    config: { sheet: 'Other' }
-  })
+  const save = (connection?: string) =>
+    resolver.updateIntegrationSettings(
+      { formId: 'form_1', appId: 'fakeapp', config: { sheet: 'Other' }, connectionId: connection },
+      FORM
+    )
+
+  await save()
   assert.strictEqual(
     ctx.integrations.get(integrationId).status,
     NEEDS_RECONNECT,
     'saving settings does not hide a revoked grant'
   )
+  assert.deepStrictEqual(ctx.resent, [])
 
   const statusResolver = new UpdateIntegrationStatusResolver(ctx.integrationService)
   await assertBadRequest(
@@ -750,22 +1089,174 @@ async function testSettingsNeedAConnectedAccount() {
     }),
     /Reconnect the account/
   )
+
+  // Picking a working account fixes it, and sends what waited
+  const working = await ctx.connectionService.create({
+    teamId: 'team_1',
+    provider: 'fake',
+    accountId: 'account-2',
+    scopes: ['rows.read', 'rows.write'],
+    createdBy: 'user_1',
+    tokens: {}
+  })
+  await save(working)
+  assert.strictEqual(ctx.integrations.get(integrationId).status, IntegrationStatusEnum.ACTIVE)
+  assert.strictEqual(ctx.integrations.get(integrationId).connectionId, working)
+  assert.deepStrictEqual(ctx.resent, [integrationId])
+  assert.ok(ctx.connections.has(connectionId), 'the other account stays connected')
 }
 
-function deleteIntegration(ctx: ReturnType<typeof createAuth>, deleted: string[] = []) {
-  const integrationService = {
-    ...ctx.integrationService,
-    delete: async (formId: string, appId: string) => {
-      deleted.push(`${formId}/${appId}`)
-      return true
-    }
+function createUserService(users: Record<string, string>) {
+  return {
+    findAll: async (ids: string[]) =>
+      ids.filter(id => users[id]).map(id => ({ id, name: users[id] }))
   }
-
-  return new DeleteIntegrationSettingsResolver(
-    integrationService,
-    ctx.service
-  ).deleteIntegrationSettings({ formId: 'form_1', appId: 'fakeapp' })
 }
+
+async function testListsTheTeamsAccountsForAnApp() {
+  const ctx = createAuth()
+  const { connectionId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  const readOnly = await ctx.connectionService.create({
+    teamId: 'team_1',
+    provider: 'fake',
+    accountId: 'account-2',
+    accountEmail: 'reader@example.com',
+    scopes: ['rows.read'],
+    createdBy: 'user_2',
+    status: CONNECTION_NEEDS_RECONNECT,
+    statusReason: 'Fake rejected the token request: invalid_grant',
+    tokens: {}
+  })
+  // Another team's, and another provider's: not listed
+  await ctx.connectionService.create({
+    teamId: 'team_2',
+    provider: 'fake',
+    accountId: 'account-1',
+    createdBy: 'user_9',
+    tokens: {}
+  })
+  await ctx.connectionService.create({
+    teamId: 'team_1',
+    provider: 'unconfigured',
+    accountId: 'account-1',
+    createdBy: 'user_1',
+    tokens: {}
+  })
+
+  const resolver = new IntegrationConnectionsResolver(
+    ctx.appService,
+    ctx.service,
+    createUserService({ user_1: 'Ann', user_2: 'Ben' })
+  )
+  const listed = await resolver.integrationConnections({ formId: 'form_1', appId: 'fakeapp' }, FORM)
+
+  assert.deepStrictEqual(listed, [
+    {
+      id: connectionId,
+      provider: 'fake',
+      providerName: 'Fake',
+      accountEmail: 'owner@example.com',
+      accountName: undefined,
+      connectedBy: 'Ann',
+      status: CONNECTION_ACTIVE,
+      statusReason: undefined,
+      hasScopes: true
+    },
+    {
+      id: readOnly,
+      provider: 'fake',
+      providerName: 'Fake',
+      accountEmail: 'reader@example.com',
+      accountName: undefined,
+      connectedBy: 'Ben',
+      status: CONNECTION_NEEDS_RECONNECT,
+      statusReason: 'Fake rejected the token request: invalid_grant',
+      hasScopes: false
+    }
+  ])
+  assert.ok(!JSON.stringify(listed).includes('tokens'))
+
+  // Not for apps without OAuth2
+  assert.deepStrictEqual(
+    await resolver.integrationConnections({ formId: 'form_1', appId: 'keyapp' }, FORM),
+    []
+  )
+}
+
+// --- team settings ----------------------------------------------------------
+
+function createTeamResolver(ctx: ReturnType<typeof createAuth>) {
+  return new TeamIntegrationConnectionsResolver(
+    ctx.appService,
+    ctx.connectionService,
+    ctx.integrationService,
+    {
+      findAllByIds: async (ids: string[]) =>
+        [
+          { id: 'form_1', name: 'Leads', teamId: 'team_1' },
+          { id: 'form_2', name: 'Survey', teamId: 'team_1' }
+        ].filter(form => ids.includes(form.id))
+    },
+    createUserService({ user_1: 'Ann', user_2: 'Ben' })
+  )
+}
+
+async function testTeamSettingsListConnectedAccounts() {
+  const ctx = createAuth()
+  const { connectionId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  await ctx.integrationService.create({
+    formId: 'form_2',
+    appId: 'fakeapp',
+    config: {},
+    status: IntegrationStatusEnum.ACTIVE,
+    connectionId
+  })
+  const unused = await ctx.connectionService.create({
+    teamId: 'team_1',
+    provider: 'fake',
+    accountId: 'account-2',
+    accountEmail: 'ben@example.com',
+    createdBy: 'user_2',
+    tokens: {}
+  })
+  const team = { id: 'team_1', ownerId: 'user_owner' }
+  const list = (userId: string) =>
+    createTeamResolver(ctx).teamIntegrationConnections({ id: userId }, team, { teamId: 'team_1' })
+
+  const forAnn = await list('user_1')
+  assert.deepStrictEqual(
+    forAnn.map((c: any) => [c.id, c.accountEmail, c.connectedBy, c.forms, c.canDisconnect]),
+    [
+      [
+        connectionId,
+        'owner@example.com',
+        'Ann',
+        [
+          { id: 'form_1', name: 'Leads' },
+          { id: 'form_2', name: 'Survey' }
+        ],
+        true
+      ],
+      [unused, 'ben@example.com', 'Ben', [], false]
+    ]
+  )
+  assert.strictEqual(forAnn[0].providerName, 'Fake')
+  assert.ok(!JSON.stringify(forAnn).includes('tokens'))
+
+  // The owner can disconnect any of them; another member only their own
+  assert.deepStrictEqual(
+    (await list('user_owner')).map((c: any) => c.canDisconnect),
+    [true, true]
+  )
+  assert.deepStrictEqual(
+    (await list('user_2')).map((c: any) => c.canDisconnect),
+    [false, true]
+  )
+}
+
+// --- disconnecting ----------------------------------------------------------
+
+const TEAM = { id: 'team_1', ownerId: 'user_owner' }
 
 function captureLogs(ctx: ReturnType<typeof createAuth>) {
   const logged: string[] = []
@@ -774,39 +1265,116 @@ function captureLogs(ctx: ReturnType<typeof createAuth>) {
   return logged
 }
 
-async function testDeletingTheIntegrationDropsItsTokens() {
+async function testDeletingAnIntegrationKeepsTheAccount() {
   const ctx = createAuth()
-  const { oauthId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  const { connectionId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  const otherForm = await ctx.integrationService.create({
+    formId: 'form_2',
+    appId: 'fakeapp',
+    config: {},
+    status: IntegrationStatusEnum.ACTIVE,
+    connectionId
+  })
   const deleted: string[] = []
+  provider.requests = []
+
+  await new DeleteIntegrationSettingsResolver({
+    ...ctx.integrationService,
+    delete: async (formId: string, appId: string) => {
+      deleted.push(`${formId}/${appId}`)
+      return true
+    }
+  }).deleteIntegrationSettings({ formId: 'form_1', appId: 'fakeapp' })
+
+  assert.deepStrictEqual(deleted, ['form_1/fakeapp'])
+  assert.ok(ctx.connections.has(connectionId), "the team's account stays connected")
+  assert.deepStrictEqual(provider.revokeRequests, [])
+  // Other forms keep using it
+  assert.deepStrictEqual(
+    [ctx.integrations.get(otherForm).status, ctx.integrations.get(otherForm).connectionId],
+    [IntegrationStatusEnum.ACTIVE, connectionId]
+  )
+}
+
+async function testDisconnectingRevokesAndHoldsIntegrations() {
+  const ctx = createAuth()
+  const { connectionId, integrationId } = await connect(ctx, {
+    accessToken: 'a',
+    refreshToken: 'r'
+  })
+  const disabled = await ctx.integrationService.create({
+    formId: 'form_2',
+    appId: 'fakeapp',
+    config: {},
+    status: IntegrationStatusEnum.DISABLED,
+    connectionId
+  })
   provider.requests = []
   provider.handler = () => ({ status: 200, body: {} })
 
-  await deleteIntegration(ctx, deleted)
+  await ctx.service.disconnectConnection(ctx.connections.get(connectionId), 'user_1', TEAM)
 
-  assert.deepStrictEqual(deleted, ['form_1/fakeapp'])
-  assert.strictEqual(ctx.oauthRecords.has(oauthId), false)
-
-  // Revoked at the provider, with the refresh token so the grant goes
-  assert.deepStrictEqual(provider.revokeRequests, [
-    {
-      path: '/revoke',
-      params: {
+  assert.strictEqual(ctx.connections.has(connectionId), false)
+  assert.deepStrictEqual(
+    provider.revokeRequests.map(r => r.params),
+    [
+      {
         token: 'r',
         token_type_hint: 'refresh_token',
         client_id: 'fake-client-id',
         client_secret: 'fake-client-secret'
       }
-    }
-  ])
+    ]
+  )
+  // Its integrations wait for another account, with their submissions held
+  const active = ctx.integrations.get(integrationId)
+  assert.strictEqual(active.status, NEEDS_RECONNECT)
+  assert.strictEqual(active.connectionId, undefined)
+  assert.strictEqual(ctx.integrations.get(disabled).status, IntegrationStatusEnum.DISABLED)
+  assert.strictEqual(ctx.integrations.get(disabled).connectionId, undefined)
+}
+
+async function testOnlyTheConnectorOrOwnerCanDisconnect() {
+  const ctx = createAuth()
+  const { connectionId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  provider.handler = () => ({ status: 200, body: {} })
+  const resolver = new DisconnectIntegrationConnectionResolver(ctx.connectionService, ctx.service)
+  const disconnect = (userId: string, input: Record<string, any> = {}, team = TEAM) =>
+    resolver.disconnectIntegrationConnection({ id: userId }, team, {
+      teamId: team.id,
+      connectionId,
+      ...input
+    })
+
+  await assert.rejects(disconnect('user_2'), (error: any) => error instanceof ForbiddenException)
+  // Another team can't reach it
+  await assertBadRequest(
+    disconnect('user_1', {}, { id: 'team_2', ownerId: 'user_1' }),
+    /does not exist/
+  )
+  await assertBadRequest(disconnect('user_1', { connectionId: 'missing' }), /does not exist/)
+  assert.ok(ctx.connections.has(connectionId))
+
+  // The team owner can
+  assert.strictEqual(await disconnect('user_owner'), true)
+  assert.strictEqual(ctx.connections.has(connectionId), false)
+
+  // ...and so can whoever connected it
+  const own = await connect(ctx, { accessToken: 'a', refreshToken: 'r' }, { formId: 'form_2' })
+  await resolver.disconnectIntegrationConnection({ id: 'user_1' }, TEAM, {
+    teamId: 'team_1',
+    connectionId: own.connectionId
+  })
+  assert.strictEqual(ctx.connections.has(own.connectionId), false)
 }
 
 async function testRevokesAnAccessTokenWithoutRefreshToken() {
   const ctx = createAuth()
-  await connect(ctx, { accessToken: 'a' })
+  const { connectionId } = await connect(ctx, { accessToken: 'a' })
   provider.requests = []
   provider.handler = () => ({ status: 200, body: {} })
 
-  await deleteIntegration(ctx)
+  await ctx.service.disconnectConnection(ctx.connections.get(connectionId), 'user_1', TEAM)
 
   assert.deepStrictEqual(
     provider.revokeRequests.map(r => [r.params.token, r.params.token_type_hint]),
@@ -814,18 +1382,22 @@ async function testRevokesAnAccessTokenWithoutRefreshToken() {
   )
 }
 
-async function testFailedRevocationNeverBlocksDeletion() {
+async function testFailedRevocationNeverBlocksDisconnecting() {
   // The provider refuses
   const refused = createAuth()
   const refusedLogs = captureLogs(refused)
-  const { oauthId } = await connect(refused, { accessToken: 'secret-a', refreshToken: 'secret-r' })
+  const first = await connect(refused, { accessToken: 'secret-a', refreshToken: 'secret-r' })
   provider.handler = () => ({ status: 503, body: { error: 'unavailable' } })
 
-  await deleteIntegration(refused)
-  assert.strictEqual(refused.oauthRecords.has(oauthId), false)
+  await refused.service.disconnectConnection(
+    refused.connections.get(first.connectionId),
+    'user_1',
+    TEAM
+  )
+  assert.strictEqual(refused.connections.has(first.connectionId), false)
   assert.match(
     refusedLogs.join('\n'),
-    /didn't revoke the grant of integration integration_\d+: HTTP 503/
+    /didn't revoke the grant of connection connection_\d+: HTTP 503/
   )
 
   // The provider can't be reached
@@ -834,8 +1406,12 @@ async function testFailedRevocationNeverBlocksDeletion() {
   unreachable.appService.providers.fake.revokeUrl = 'http://127.0.0.1:1/revoke'
   const second = await connect(unreachable, { accessToken: 'secret-a', refreshToken: 'secret-r' })
 
-  await deleteIntegration(unreachable)
-  assert.strictEqual(unreachable.oauthRecords.has(second.oauthId), false)
+  await unreachable.service.disconnectConnection(
+    unreachable.connections.get(second.connectionId),
+    'user_1',
+    TEAM
+  )
+  assert.strictEqual(unreachable.connections.has(second.connectionId), false)
   assert.match(unreachableLogs.join('\n'), /failed: ECONNREFUSED/)
 
   for (const message of [...refusedLogs, ...unreachableLogs]) {
@@ -843,65 +1419,96 @@ async function testFailedRevocationNeverBlocksDeletion() {
   }
 }
 
-async function testNothingToRevokeStillDeletes() {
+async function testNothingToRevokeStillDisconnects() {
   // No revoke endpoint
   const ctx = createAuth()
   delete ctx.appService.providers.fake.revokeUrl
-  const { oauthId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  const first = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
   provider.requests = []
 
-  await deleteIntegration(ctx)
-  assert.strictEqual(ctx.oauthRecords.has(oauthId), false)
+  await ctx.service.disconnectConnection(ctx.connections.get(first.connectionId), 'user_1', TEAM)
+  assert.strictEqual(ctx.connections.has(first.connectionId), false)
 
   // Tokens that no longer decrypt
   const unreadable = createAuth()
-  const connected = await connect(unreadable, { accessToken: 'a', refreshToken: 'r' })
-  unreadable.oauthRecords.get(connected.oauthId).tokens.refreshToken = encryptSecret('r', 'old-key')
+  const second = await connect(unreadable, { accessToken: 'a', refreshToken: 'r' })
+  unreadable.connections.get(second.connectionId).tokens.refreshToken = encryptSecret(
+    'r',
+    'old-key'
+  )
 
-  await deleteIntegration(unreadable)
-  assert.strictEqual(unreadable.oauthRecords.has(connected.oauthId), false)
+  await unreadable.service.disconnectConnection(
+    unreadable.connections.get(second.connectionId),
+    'user_1',
+    TEAM
+  )
+  assert.strictEqual(unreadable.connections.has(second.connectionId), false)
+  assert.strictEqual(unreadable.integrations.get(second.integrationId).status, NEEDS_RECONNECT)
   assert.deepStrictEqual(provider.revokeRequests, [])
 }
 
-async function testGrantSharedWithAnotherConnectionIsKept() {
+async function testAccountUsedByAnotherWorkspaceIsNotRevoked() {
   const ctx = createAuth()
   const logged = captureLogs(ctx)
-  const { oauthId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
-  // Another form's connection through the same provider, which may be the
-  // same account and so the same grant
-  const other = await ctx.thirdPartyService.createOrUpdate('fakeapp', 'form_2', 'rows.read', {
+  const { connectionId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
+  // The same account, connected in another workspace: Google would revoke
+  // that workspace's tokens too
+  const elsewhere = await ctx.connectionService.create({
+    teamId: 'team_2',
+    provider: 'fake',
+    accountId: 'account-1',
+    createdBy: 'user_9',
+    tokens: encryptTokens({ refreshToken: 'r2' })
+  })
+  // Another account in that workspace doesn't matter
+  await ctx.connectionService.create({
+    teamId: 'team_2',
+    provider: 'fake',
+    accountId: 'account-2',
+    createdBy: 'user_9',
     tokens: {}
   })
   provider.requests = []
   provider.handler = () => ({ status: 200, body: {} })
 
-  await deleteIntegration(ctx)
+  await ctx.service.disconnectConnection(ctx.connections.get(connectionId), 'user_1', TEAM)
 
-  assert.strictEqual(ctx.oauthRecords.has(oauthId), false)
-  assert.ok(ctx.oauthRecords.has(other), "the other form's connection is untouched")
+  assert.strictEqual(ctx.connections.has(connectionId), false)
   assert.deepStrictEqual(provider.revokeRequests, [])
-  assert.match(logged[0], /other connections may share it/)
+  assert.match(logged.join('\n'), /another workspace has the account connected/)
+
+  // When that one goes too, the grant is revoked
+  await ctx.service.disconnectConnection(ctx.connections.get(elsewhere), 'user_9', {
+    id: 'team_2',
+    ownerId: 'user_9'
+  })
+  assert.deepStrictEqual(
+    provider.revokeRequests.map(r => r.params.token),
+    ['r2']
+  )
 }
 
-async function testConcurrentDeletesStillRevokeTheGrant() {
+async function testConcurrentDisconnectsStillRevokeTheGrant() {
   const ctx = createAuth()
-  // Two forms' connections, deleted at the same moment
   const first = await connect(ctx, { accessToken: 'a1', refreshToken: 'r1' })
   const second = await connect(
     ctx,
     { accessToken: 'a2', refreshToken: 'r2' },
     { formId: 'form_2' },
-    'form_2'
+    { teamId: 'team_2' }
   )
   provider.requests = []
   provider.handler = () => ({ status: 200, body: {} })
 
   await Promise.all([
-    ctx.service.disconnect(ctx.integrations.get(first.integrationId)),
-    ctx.service.disconnect(ctx.integrations.get(second.integrationId))
+    ctx.service.disconnectConnection(ctx.connections.get(first.connectionId), 'user_1', TEAM),
+    ctx.service.disconnectConnection(ctx.connections.get(second.connectionId), 'user_1', {
+      id: 'team_2',
+      ownerId: 'user_1'
+    })
   ])
 
-  assert.strictEqual(ctx.oauthRecords.size, 0)
+  assert.strictEqual(ctx.connections.size, 0)
   // The last one to go revokes the grant
   assert.strictEqual(provider.revokeRequests.length, 1)
 }
@@ -941,12 +1548,13 @@ async function testValidTokenIsUsedWithoutRefresh() {
     accessToken: 'access-valid'
   })
   assert.strictEqual(provider.requests.length, 0)
+  assert.deepStrictEqual(ctx.locks, [], 'no lock needed')
 }
 
 async function testExpiredTokenIsRefreshed() {
   const ctx = createAuth()
   // Expires within the safety margin, so it counts as expired
-  const { oauthId, integration } = await connect(ctx, {
+  const { connectionId, integration } = await connect(ctx, {
     accessToken: 'access-old',
     refreshToken: 'refresh-1',
     expiresAt: Date.now() + 30_000
@@ -969,11 +1577,13 @@ async function testExpiredTokenIsRefreshed() {
       }
     ]
   )
+  assert.deepStrictEqual(ctx.locks, [`integration_connection_refresh:${connectionId}`])
 
-  const tokens = storedTokens(ctx, oauthId)
+  const tokens = storedTokens(ctx, connectionId)
   assert.strictEqual(tokens.accessToken, 'access-new')
   assert.strictEqual(tokens.refreshToken, 'refresh-2', 'a rotated refresh token is kept')
   assert.ok(tokens.expiresAt > Date.now() + 3500_000)
+  assert.strictEqual(ctx.connections.get(connectionId).tokenVersion, 1)
 
   // The refreshed token is reused until it expires
   provider.requests = []
@@ -981,12 +1591,63 @@ async function testExpiredTokenIsRefreshed() {
   assert.strictEqual(provider.requests.length, 0)
 }
 
-async function testRevokedGrantMarksNeedsReconnect() {
+async function testOneRefreshServesEveryIntegration() {
   const ctx = createAuth()
-  const { integrationId, integration } = await connect(ctx, {
+  const { connectionId, integration } = await connect(ctx, {
+    accessToken: 'access-old',
+    refreshToken: 'refresh-1',
+    expiresAt: Date.now() - 1000
+  })
+  const otherForm = await ctx.integrationService.create({
+    formId: 'form_2',
+    appId: 'fakeapp',
+    config: {},
+    status: IntegrationStatusEnum.ACTIVE,
+    connectionId
+  })
+  provider.requests = []
+  // A provider that rotates refresh tokens: a second refresh with the old
+  // one would be rejected
+  provider.handler = params =>
+    params.refresh_token === 'refresh-1' && provider.tokenRequests.length === 1
+      ? {
+          status: 200,
+          body: { access_token: 'access-new', refresh_token: 'refresh-2', expires_in: 3600 }
+        }
+      : { status: 400, body: { error: 'invalid_grant' } }
+
+  // Jobs of two forms find the token expired at the same moment
+  const tokens = await Promise.all([
+    ctx.service.getAccessToken(oauthApp, integration),
+    ctx.service.getAccessToken(oauthApp, ctx.integrations.get(otherForm)),
+    ctx.service.getAccessToken(oauthApp, integration)
+  ])
+
+  assert.deepStrictEqual(tokens, ['access-new', 'access-new', 'access-new'])
+  assert.strictEqual(provider.tokenRequests.length, 1, 'refreshed once')
+  assert.strictEqual(ctx.connections.get(connectionId).status, CONNECTION_ACTIVE)
+}
+
+async function testRevokedGrantMarksTheConnection() {
+  const ctx = createAuth()
+  const { connectionId, integrationId, integration } = await connect(ctx, {
     accessToken: 'access-old',
     refreshToken: 'refresh-revoked',
     expiresAt: Date.now() - 1000
+  })
+  const otherForm = await ctx.integrationService.create({
+    formId: 'form_2',
+    appId: 'fakeapp',
+    config: {},
+    status: IntegrationStatusEnum.ACTIVE,
+    connectionId
+  })
+  const disabled = await ctx.integrationService.create({
+    formId: 'form_3',
+    appId: 'fakeapp',
+    config: {},
+    status: IntegrationStatusEnum.DISABLED,
+    connectionId
   })
   provider.handler = () => ({
     status: 400,
@@ -1000,35 +1661,94 @@ async function testRevokedGrantMarksNeedsReconnect() {
     assert.ok(!error.message.includes('refresh-revoked'), 'tokens stay out of messages')
     return true
   })
-  assert.strictEqual(ctx.integrations.get(integrationId).status, NEEDS_RECONNECT)
+
+  const connection = ctx.connections.get(connectionId)
+  assert.strictEqual(connection.status, CONNECTION_NEEDS_RECONNECT)
+  assert.match(connection.statusReason, /invalid_grant/)
+  // Every active integration using it waits, not only this job's
+  assert.deepStrictEqual(
+    [integrationId, otherForm, disabled].map(id => ctx.integrations.get(id).status),
+    [NEEDS_RECONNECT, NEEDS_RECONNECT, IntegrationStatusEnum.DISABLED]
+  )
+
+  // Later jobs fail without calling the provider
+  provider.requests = []
+  await assert.rejects(
+    ctx.service.getAccessToken(oauthApp, ctx.integrations.get(otherForm)),
+    (error: any) => error instanceof IntegrationAuthError && /invalid_grant/.test(error.message)
+  )
+  assert.strictEqual(provider.requests.length, 0)
+
+  // ...even if the access token hasn't expired yet: the grant behind it is gone
+  const fresh = await connect(
+    ctx,
+    { accessToken: 'still-unexpired', refreshToken: 'r', expiresAt: Date.now() + 3600_000 },
+    { formId: 'form_4' },
+    { accountId: 'account-4', status: CONNECTION_NEEDS_RECONNECT, statusReason: 'revoked' }
+  )
+  await assert.rejects(
+    ctx.service.getAccessToken(oauthApp, fresh.integration),
+    (error: any) => error instanceof IntegrationAuthError && error.needsReconnect
+  )
+  assert.strictEqual(ctx.integrations.get(fresh.integrationId).status, NEEDS_RECONNECT)
 }
 
-async function testConcurrentRotationIsNotAReconnect() {
+async function testReconnectDuringRefreshIsNotARevocation() {
   const ctx = createAuth()
-  const { oauthId, integrationId, integration } = await connect(ctx, {
+  const { connectionId, integrationId, integration } = await connect(ctx, {
     accessToken: 'access-old',
     refreshToken: 'refresh-1',
     expiresAt: Date.now() - 1000
   })
 
-  // Another worker refreshes first and rotates the refresh token
+  // Someone connects the account again while the refresh runs, and the
+  // provider rejects the old refresh token
   provider.handler = () => {
-    const key = process.env.FORM_ENCRYPTION_KEY!
-    ctx.oauthRecords.get(oauthId).tokens = {
-      accessToken: encryptSecret('access-other-worker', key),
-      refreshToken: encryptSecret('refresh-2', key),
+    const connection = ctx.connections.get(connectionId)
+    connection.tokens = encryptTokens({
+      accessToken: 'access-reconnected',
+      refreshToken: 'refresh-2',
       expiresAt: Date.now() + 3600_000
-    }
+    })
+    connection.tokenVersion++
     return { status: 400, body: { error: 'invalid_grant' } }
   }
 
-  assert.strictEqual(await ctx.service.getAccessToken(oauthApp, integration), 'access-other-worker')
+  assert.strictEqual(await ctx.service.getAccessToken(oauthApp, integration), 'access-reconnected')
+  assert.strictEqual(ctx.connections.get(connectionId).status, CONNECTION_ACTIVE)
   assert.strictEqual(ctx.integrations.get(integrationId).status, IntegrationStatusEnum.ACTIVE)
+}
+
+async function testRefreshDoesNotOverwriteAReconnect() {
+  const ctx = createAuth()
+  const { connectionId, integration } = await connect(ctx, {
+    accessToken: 'access-old',
+    refreshToken: 'refresh-1',
+    expiresAt: Date.now() - 1000
+  })
+
+  // The account is connected again while the refresh runs, which succeeds
+  provider.handler = () => {
+    const connection = ctx.connections.get(connectionId)
+    connection.tokens = encryptTokens({
+      accessToken: 'access-reconnected',
+      refreshToken: 'refresh-9'
+    })
+    connection.tokenVersion++
+    return { status: 200, body: { access_token: 'access-refreshed', expires_in: 3600 } }
+  }
+
+  // This job can use its token, but the reconnect's tokens are kept
+  assert.strictEqual(await ctx.service.getAccessToken(oauthApp, integration), 'access-refreshed')
+  assert.deepStrictEqual(
+    [storedTokens(ctx, connectionId).accessToken, storedTokens(ctx, connectionId).refreshToken],
+    ['access-reconnected', 'refresh-9']
+  )
 }
 
 async function testTransientRefreshFailureIsRetried() {
   const ctx = createAuth()
-  const { integrationId, integration } = await connect(ctx, {
+  const { connectionId, integrationId, integration } = await connect(ctx, {
     accessToken: 'access-old',
     refreshToken: 'refresh-1',
     expiresAt: Date.now() - 1000
@@ -1040,6 +1760,7 @@ async function testTransientRefreshFailureIsRetried() {
     assert.match(error.message, /HTTP 503/)
     return true
   })
+  assert.strictEqual(ctx.connections.get(connectionId).status, CONNECTION_ACTIVE)
   assert.strictEqual(ctx.integrations.get(integrationId).status, IntegrationStatusEnum.ACTIVE)
 
   // A provider that can't be reached at all
@@ -1054,12 +1775,13 @@ async function testTransientRefreshFailureIsRetried() {
 
 async function testMissingOrUnreadableConnectionNeedsReconnect() {
   const ctx = createAuth()
+
+  // No account picked (e.g. it was disconnected)
   const missing = await ctx.integrationService.create({
     formId: 'form_2',
     appId: 'fakeapp',
     status: IntegrationStatusEnum.ACTIVE
   })
-
   await assert.rejects(
     ctx.service.getAccessToken(oauthApp, ctx.integrations.get(missing)),
     (error: any) => error instanceof IntegrationAuthError && error.needsReconnect
@@ -1067,15 +1789,19 @@ async function testMissingOrUnreadableConnectionNeedsReconnect() {
   assert.strictEqual(ctx.integrations.get(missing).status, NEEDS_RECONNECT)
 
   // Tokens encrypted with a key that has since changed
-  const { oauthId, integrationId, integration } = await connect(ctx, {
+  const { connectionId, integrationId, integration } = await connect(ctx, {
     accessToken: 'a',
     refreshToken: 'r'
   })
-  ctx.oauthRecords.get(oauthId).tokens.accessToken = encryptSecret('a', 'old-key')
+  ctx.connections.get(connectionId).tokens.accessToken = encryptSecret('a', 'old-key')
   await assert.rejects(
     ctx.service.getAccessToken(oauthApp, integration),
-    (error: any) => error instanceof IntegrationAuthError && error.needsReconnect
+    (error: any) =>
+      error instanceof IntegrationAuthError &&
+      error.needsReconnect &&
+      /tokens cannot be read/.test(error.message)
   )
+  assert.strictEqual(ctx.connections.get(connectionId).status, CONNECTION_NEEDS_RECONNECT)
   assert.strictEqual(ctx.integrations.get(integrationId).status, NEEDS_RECONNECT)
 }
 
@@ -1091,7 +1817,7 @@ function createQueue(ctx: ReturnType<typeof createAuth>, runs: any[]) {
     new IntegrationAuthService(
       appService,
       ctx.integrationService,
-      ctx.thirdPartyService,
+      ctx.connectionService,
       ctx.redisService
     ),
     { findById: async () => ({ id: 'submission_1' }) },
@@ -1226,7 +1952,7 @@ async function startAuthorization(ctx: ReturnType<typeof createAuth>) {
 async function testCallbackConnectsAndRedirectsBack() {
   const ctx = createAuth()
   const state = await startAuthorization(ctx)
-  provider.handler = () => ({ status: 200, body: { access_token: 'a', refresh_token: 'r' } })
+  grantTokens()
 
   const res = createResponse()
   await createController(ctx).callback(
@@ -1241,7 +1967,11 @@ async function testCallbackConnectsAndRedirectsBack() {
     '/workspace/team_1/project/project_1/form/form_1/integrations?appId=fakeapp&integrationConnected=1'
   )
   assert.deepStrictEqual(res.cleared, ['HEYFORM_INTEGRATION_OAUTH_STATE'])
-  assert.ok([...ctx.integrations.values()][0].thirdPartyOauthId)
+
+  // A connection of the form's team, by this user, picked for the form
+  const [connection] = ctx.connections.values()
+  assert.deepStrictEqual([connection.teamId, connection.createdBy], ['team_1', 'user_1'])
+  assert.strictEqual([...ctx.integrations.values()][0].connectionId, connection.id)
 }
 
 async function testCallbackRejectsForeignOrForgedState() {
@@ -1288,6 +2018,7 @@ async function testCallbackRejectsForeignOrForgedState() {
     /permission/
   )
   assert.strictEqual(ctx.integrations.size, 0)
+  assert.strictEqual(ctx.connections.size, 0)
 }
 
 async function testCallbackReportsDeniedAndFailedConnections() {
@@ -1315,6 +2046,7 @@ async function testCallbackReportsDeniedAndFailedConnections() {
   )
   assert.match(failedRes.redirectedTo!, /integrationError=connect_failed$/)
   assert.strictEqual(ctx.integrations.size, 0)
+  assert.strictEqual(ctx.connections.size, 0)
 }
 
 async function run() {
@@ -1332,21 +2064,29 @@ async function run() {
     await testUnreadableApiKeyNeedsANewKey()
     await testAuthorizeUrlAndState()
     await testStateIsBoundToUserAndSingleUse()
-    await testCompleteAuthorizationStoresEncryptedTokens()
-    await testRejectsExpiringTokenWithoutRefreshToken()
-    await testReconnectRestoresStatusAndKeepsRefreshToken()
-    await testSettingsNeedAConnectedAccount()
-    await testDeletingTheIntegrationDropsItsTokens()
+    await testConnectingCreatesATeamConnection()
+    await testRejectsConnectionsThatCantBeUsed()
+    await testSameAccountSharesOneConnection()
+    await testReconnectingResumesEveryIntegrationUsingIt()
+    await testSettingsPickOneOfTheTeamsAccounts()
+    await testPickingAnAccountThatNeedsReconnecting()
+    await testListsTheTeamsAccountsForAnApp()
+    await testTeamSettingsListConnectedAccounts()
+    await testDeletingAnIntegrationKeepsTheAccount()
+    await testDisconnectingRevokesAndHoldsIntegrations()
+    await testOnlyTheConnectorOrOwnerCanDisconnect()
     await testRevokesAnAccessTokenWithoutRefreshToken()
-    await testFailedRevocationNeverBlocksDeletion()
-    await testNothingToRevokeStillDeletes()
-    await testGrantSharedWithAnotherConnectionIsKept()
-    await testConcurrentDeletesStillRevokeTheGrant()
+    await testFailedRevocationNeverBlocksDisconnecting()
+    await testNothingToRevokeStillDisconnects()
+    await testAccountUsedByAnotherWorkspaceIsNotRevoked()
+    await testConcurrentDisconnectsStillRevokeTheGrant()
     await testTurningOnResendsWaitingSubmissions()
     await testValidTokenIsUsedWithoutRefresh()
     await testExpiredTokenIsRefreshed()
-    await testRevokedGrantMarksNeedsReconnect()
-    await testConcurrentRotationIsNotAReconnect()
+    await testOneRefreshServesEveryIntegration()
+    await testRevokedGrantMarksTheConnection()
+    await testReconnectDuringRefreshIsNotARevocation()
+    await testRefreshDoesNotOverwriteAReconnect()
     await testTransientRefreshFailureIsRetried()
     await testMissingOrUnreadableConnectionNeedsReconnect()
     await testJobRefreshesAndPassesAuthToRun()

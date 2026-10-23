@@ -187,6 +187,33 @@ async function testAddRecordShortensLongErrors() {
   assert.strictEqual(created[1].error, undefined)
 }
 
+async function testOnlyTheCurrentIntegrationsRecordsAreListed() {
+  const queries: any[] = []
+  const chain = (filter: any) => {
+    queries.push(filter)
+    return { sort: () => ({ limit: async () => [] }) }
+  }
+  let current: any = { id: 'integration_2' }
+  const service = new IntegrationService(
+    { findOne: async () => current },
+    { find: chain },
+    {},
+    {},
+    {}
+  )
+
+  await service.findRecords('form_1', 'webhook', 20)
+  // Records left by a deleted integration_1 (e.g. a job that finished after
+  // the delete) are not included
+  assert.deepStrictEqual(queries, [
+    { formId: 'form_1', appId: 'webhook', integrationId: 'integration_2' }
+  ])
+
+  current = null
+  assert.deepStrictEqual(await service.findRecords('form_1', 'webhook', 20), [])
+  assert.strictEqual(queries.length, 1)
+}
+
 async function testDeletingAnIntegrationDeletesItsRecords() {
   const { service, deleted } = createService()
 
@@ -267,6 +294,7 @@ async function run() {
   await testRecordingErrorsDoNotFailTheJob()
   await testProcessResultDistinguishesSkippedJobs()
   await testAddRecordShortensLongErrors()
+  await testOnlyTheCurrentIntegrationsRecordsAreListed()
   await testDeletingAnIntegrationDeletesItsRecords()
   await testResolverReturnsRecentRecordsForTheFormApp()
 }

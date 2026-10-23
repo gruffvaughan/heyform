@@ -52,7 +52,8 @@ export class IntegrationRecordModel extends Document {
 
 export const IntegrationRecordSchema = SchemaFactory.createForClass(IntegrationRecordModel)
 
-IntegrationRecordSchema.index({ formId: 1, appId: 1, createdAt: -1 })
+IntegrationRecordSchema.index({ integrationId: 1, createdAt: -1 })
+IntegrationRecordSchema.index({ formId: 1, appId: 1 })
 IntegrationRecordSchema.index(
   { createdAt: 1 },
   { expireAfterSeconds: INTEGRATION_RECORD_TTL_DAYS * 24 * 60 * 60 }

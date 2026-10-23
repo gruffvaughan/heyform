@@ -152,14 +152,24 @@ export class IntegrationService {
     })
   }
 
-  // Newest first
+  /**
+   * The current integration's records, newest first. Scoped by integration id
+   * so a job that finishes after its integration was deleted can't show up
+   * under a new integration of the same app.
+   */
   async findRecords(
     formId: string,
     appId: string,
     limit: number
   ): Promise<IntegrationRecordModel[]> {
+    const integration = await this.findOne(formId, appId)
+
+    if (!integration) {
+      return []
+    }
+
     return this.integrationRecordModel
-      .find({ formId, appId })
+      .find({ formId, appId, integrationId: integration.id })
       .sort({ createdAt: -1, _id: -1 })
       .limit(limit)
   }

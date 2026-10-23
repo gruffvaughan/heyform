@@ -15,6 +15,7 @@ import { useParam } from '@/utils'
 
 import IconLogo from '@/assets/logo.svg?react'
 import { Button, Form, Image, Modal } from '@/components'
+import { INTEGRATION_STATUS_ENUM } from '@/consts'
 import { useAppStore, useFormStore, useModal } from '@/store'
 import { IntegratedAppType } from '@/types'
 
@@ -37,7 +38,13 @@ const SettingsForm: FC<IntegrationSettingsProps> = ({ app, onValuesChange }) => 
     await IntegrationService.updateSettings(formId, app.id, config, apiKey || undefined)
 
     updateIntegration(app.id, {
-      config
+      config,
+      // Saving activates the integration, as on the server, unless the
+      // account still needs reconnecting
+      status:
+        app.integration?.status === INTEGRATION_STATUS_ENUM.NEEDS_RECONNECT
+          ? INTEGRATION_STATUS_ENUM.NEEDS_RECONNECT
+          : INTEGRATION_STATUS_ENUM.ACTIVE
     })
 
     // Pick up the masked hint of the new key

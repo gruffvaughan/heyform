@@ -511,6 +511,11 @@ export enum INTEGRATION_STATUS_ENUM {
   NEEDS_RECONNECT
 }
 
+export enum INTEGRATION_CONNECTION_STATUS_ENUM {
+  ACTIVE = 1,
+  NEEDS_RECONNECT = 2
+}
+
 export enum INTEGRATION_RECORD_STATUS_ENUM {
   // Kept until the integration is reconnected, then sent
   WAITING = 0,

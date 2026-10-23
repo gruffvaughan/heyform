@@ -25,6 +25,7 @@ import {
   GOOGLE_SHEETS_LIST_GQL,
   GOOGLE_SHEETS_WORKSHEETS_GQL,
   HUBSPOT_OAUTH_GQL,
+  INTEGRATION_CONNECTIONS_GQL,
   INTEGRATION_RECORDS_GQL,
   INTEGRATION_STATUS_ENUM,
   MAILCHIMP_AUDIENCES_GQL,
@@ -83,7 +84,13 @@ export class IntegrationService {
     })
   }
 
-  static async updateSettings(formId: string, appId: string, config: AnyMap, apiKey?: string) {
+  static async updateSettings(
+    formId: string,
+    appId: string,
+    config: AnyMap,
+    apiKey?: string,
+    connectionId?: string
+  ) {
     return apollo.mutate({
       mutation: UPDATE_INTEGRATION_SETTINGS_GQL,
       variables: {
@@ -91,7 +98,22 @@ export class IntegrationService {
           formId,
           appId,
           config,
-          apiKey
+          apiKey,
+          connectionId
+        }
+      }
+    })
+  }
+
+  // The team's accounts the app can use
+  static async connections(formId: string, appId: string) {
+    return apollo.query({
+      query: INTEGRATION_CONNECTIONS_GQL,
+      fetchPolicy: 'no-cache',
+      variables: {
+        input: {
+          formId,
+          appId
         }
       }
     })

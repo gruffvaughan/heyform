@@ -54,13 +54,14 @@ export function serverEnv(env = process.env) {
 }
 
 // Another worktree of this project whose server runs on the same Redis pair, from `devbox list`.
+// If that can't be told, the server doesn't start: it might share another's Bull queues.
 function pairTakenBy(env, db) {
   let projects
   try {
     projects = JSON.parse(execFileSync('devbox', ['list', '--json'], { encoding: 'utf8' })).projects
   } catch (e) {
     console.error(`devbox-env: couldn't check the Redis DB with \`devbox list\`: ${e.message}`)
-    return null
+    process.exit(1)
   }
   const project = projects.find(p => p.slug === env.DEVBOX_PROJECT)
   return (project?.worktrees ?? []).find(

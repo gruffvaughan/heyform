@@ -2,7 +2,7 @@ import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator'
 
 import { FormDetailInput } from './form.graphql'
 import { IntegrationStatusEnum } from '@model'
-import { Field, InputType } from '@nestjs/graphql'
+import { Field, InputType, ObjectType } from '@nestjs/graphql'
 import { GraphQLJSONObject } from 'graphql-type-json'
 
 @InputType()
@@ -35,4 +35,33 @@ export class UpdateIntegrationStatusInput extends IntegrationInput {
   @Field(type => Number)
   @IsEnum(IntegrationStatusEnum)
   status: IntegrationStatusEnum
+}
+
+@ObjectType()
+export class IntegrationRecordType {
+  @Field()
+  id: string
+
+  @Field()
+  submissionId: string
+
+  // IntegrationRecordStatusEnum: 1 succeeded, 2 failed
+  @Field(type => Number)
+  status: number
+
+  @Field()
+  attempt: number
+
+  @Field()
+  maxAttempts: number
+
+  @Field()
+  willRetry: boolean
+
+  @Field({ nullable: true })
+  error?: string
+
+  // Unix seconds
+  @Field()
+  createdAt: number
 }

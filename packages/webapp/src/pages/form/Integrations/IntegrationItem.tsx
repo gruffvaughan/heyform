@@ -13,6 +13,8 @@ import { APP_STATUS_ENUM, INTEGRATION_STATUS_ENUM } from '@/consts'
 import { useAppStore, useFormStore } from '@/store'
 import { IntegratedAppType } from '@/types'
 
+import { IntegrationWaitingCount } from './IntegrationRecords'
+
 interface IntegrationItemProps {
   app: IntegratedAppType
 }
@@ -37,7 +39,11 @@ const IntegrationItem: FC<IntegrationItemProps> = ({ app }) => {
       const status = checked ? INTEGRATION_STATUS_ENUM.ACTIVE : INTEGRATION_STATUS_ENUM.DISABLED
 
       await IntegrationService.updateStatus(formId, app.id, status)
-      updateIntegration(app.id, { status })
+      updateIntegration(app.id, {
+        status,
+        // Turning it on sends what was waiting
+        ...(checked ? { waitingCount: 0 } : {})
+      })
     },
     {
       manual: true,
@@ -142,6 +148,7 @@ const IntegrationItem: FC<IntegrationItemProps> = ({ app }) => {
           })}
         </div>
       )}
+      <IntegrationWaitingCount count={app.integration?.waitingCount} />
     </li>
   )
 }

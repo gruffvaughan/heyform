@@ -13,7 +13,10 @@ import {
 import { Form } from '../src/components'
 import i18n from '../src/i18n'
 import { ApiKeyItem, ConnectAccount } from '../src/pages/form/Integrations/IntegrationAuthItem'
-import { IntegrationRecordList } from '../src/pages/form/Integrations/IntegrationRecords'
+import {
+  IntegrationRecordList,
+  IntegrationWaitingCount
+} from '../src/pages/form/Integrations/IntegrationRecords'
 import IntegrationSettingsItem from '../src/pages/form/Integrations/IntegrationSettingsItem'
 import type { AppSettingType, IntegratedAppType } from '../src/types/form'
 
@@ -273,4 +276,59 @@ test('lists delivery attempts with their outcome', async () => {
 test('says when nothing has been sent yet', async () => {
   await act(async () => root.render(<IntegrationRecordList records={[]} />))
   expect(container.textContent).toBe('No submissions have been sent yet.')
+})
+
+test('shows submissions waiting for the account to be reconnected', async () => {
+  const now = Math.floor(Date.now() / 1000)
+
+  await act(async () =>
+    root.render(
+      <IntegrationRecordList
+        records={[
+          {
+            id: 'r2',
+            submissionId: 's2',
+            status: 0,
+            attempt: 0,
+            maxAttempts: 3,
+            willRetry: false,
+            createdAt: now
+          },
+          {
+            id: 'r1',
+            submissionId: 's1',
+            status: 0,
+            attempt: 1,
+            maxAttempts: 3,
+            willRetry: false,
+            error: 'Google rejected the token request: invalid_grant',
+            createdAt: now - 60
+          }
+        ]}
+      />
+    )
+  )
+
+  const items = [...container.querySelectorAll('li')].map(li => li.textContent)
+
+  expect(items[0]).toContain('Waiting')
+  expect(items[0]).not.toContain('Failed')
+  expect(items[1]).toContain('invalid_grant')
+  // Not an attempt that failed, so no attempt count
+  expect(items[1]).not.toContain('Attempt')
+})
+
+test('counts the submissions that are waiting', async () => {
+  await act(async () => root.render(<IntegrationWaitingCount count={12} />))
+  expect(container.textContent).toBe('12 submissions are waiting to be sent.')
+
+  await act(async () => root.render(<IntegrationWaitingCount count={1} />))
+  expect(container.textContent).toBe('1 submission is waiting to be sent.')
+
+  await act(async () => root.render(<IntegrationWaitingCount count={0} />))
+  expect(container.textContent).toBe('')
+
+  await i18n.changeLanguage('zh-cn')
+  await act(async () => root.render(<IntegrationWaitingCount count={3} />))
+  expect(container.textContent).toBe('3 条提交等待发送。')
 })

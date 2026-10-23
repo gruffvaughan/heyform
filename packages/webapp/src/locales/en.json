@@ -1117,6 +1117,14 @@
         "accessDenied": "Access to your {{name}} account wasn't granted.",
         "connectFailed": "Couldn't connect your {{name}} account. Please try again."
       },
+      "records": {
+        "title": "Recent deliveries",
+        "empty": "No submissions have been sent yet.",
+        "succeeded": "Delivered",
+        "failed": "Failed",
+        "retrying": "Retrying",
+        "attempt": "Attempt {{attempt}} of {{maxAttempts}}"
+      },
       "apps": {
         "webhook": {
           "description": "With webhooks integration, you can send every submission straight to any URL as soon as it's submitted.",

@@ -1106,6 +1106,17 @@
           "headline": "Database"
         }
       },
+      "auth": {
+        "apiKey": "API key",
+        "apiKeySaved": "A key is saved ({{hint}}). Leave this blank to keep it.",
+        "connectDescription": "Connect your {{name}} account so HeyForm can send submissions to it.",
+        "connectAccount": "Connect {{name}} account",
+        "reconnect": "Reconnect",
+        "reconnectAccount": "Reconnect {{name}} account",
+        "needsReconnect": "Your {{name}} account needs reconnecting. Deliveries are paused until then.",
+        "accessDenied": "Access to your {{name}} account wasn't granted.",
+        "connectFailed": "Couldn't connect your {{name}} account. Please try again."
+      },
       "apps": {
         "webhook": {
           "description": "With webhooks integration, you can send every submission straight to any URL as soon as it's submitted.",

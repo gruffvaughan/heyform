@@ -4,7 +4,7 @@ import { FC, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { getIntegrationAuth, getIntegrationDescription } from './utils'
-import { IntegrationService } from '@/services'
+import { FormService, IntegrationService } from '@/services'
 import { useParam } from '@/utils'
 import { helper } from '@heyform-inc/utils'
 
@@ -24,7 +24,7 @@ const IntegrationItem: FC<IntegrationItemProps> = ({ app }) => {
 
   const { formId } = useParam()
   const { openModal } = useAppStore()
-  const { updateIntegration, deleteIntegration } = useFormStore()
+  const { updateIntegration, deleteIntegration, setIntegrations } = useFormStore()
   const [hasIconError, setHasIconError] = useState(false)
 
   const active = useMemo(
@@ -39,11 +39,12 @@ const IntegrationItem: FC<IntegrationItemProps> = ({ app }) => {
       const status = checked ? INTEGRATION_STATUS_ENUM.ACTIVE : INTEGRATION_STATUS_ENUM.DISABLED
 
       await IntegrationService.updateStatus(formId, app.id, status)
-      updateIntegration(app.id, {
-        status,
-        // Turning it on sends what was waiting
-        ...(checked ? { waitingCount: 0 } : {})
-      })
+      updateIntegration(app.id, { status })
+
+      // Turning it on sends what was waiting; the server says what's left
+      if (checked && app.integration?.waitingCount) {
+        setIntegrations(await FormService.integrations(formId))
+      }
     },
     {
       manual: true,

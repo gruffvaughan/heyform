@@ -38,22 +38,19 @@ const SettingsForm: FC<IntegrationSettingsProps> = ({ app, onValuesChange }) => 
   async function fetch({ apiKey, ...config }: AnyMap) {
     await IntegrationService.updateSettings(formId, app.id, config, apiKey || undefined)
 
-    const status =
-      app.integration?.status === INTEGRATION_STATUS_ENUM.NEEDS_RECONNECT
-        ? INTEGRATION_STATUS_ENUM.NEEDS_RECONNECT
-        : INTEGRATION_STATUS_ENUM.ACTIVE
-
     updateIntegration(app.id, {
       config,
       // Saving activates the integration, as on the server, unless the
       // account still needs reconnecting
-      status,
-      // An active integration has sent what was waiting
-      ...(status === INTEGRATION_STATUS_ENUM.ACTIVE ? { waitingCount: 0 } : {})
+      status:
+        app.integration?.status === INTEGRATION_STATUS_ENUM.NEEDS_RECONNECT
+          ? INTEGRATION_STATUS_ENUM.NEEDS_RECONNECT
+          : INTEGRATION_STATUS_ENUM.ACTIVE
     })
 
-    // Pick up the masked hint of the new key, and the status it restores
-    if (apiKey) {
+    // Pick up the masked hint of a new key, the status it restores, and
+    // what's still waiting once the server has resent the rest
+    if (apiKey || app.integration?.waitingCount) {
       setIntegrations(await FormService.integrations(formId))
     }
 

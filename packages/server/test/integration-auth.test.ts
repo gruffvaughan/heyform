@@ -1481,8 +1481,8 @@ async function testAccountUsedByAnotherWorkspaceIsNotRevoked() {
   const ctx = createAuth()
   const logged = captureLogs(ctx)
   const { connectionId } = await connect(ctx, { accessToken: 'a', refreshToken: 'r' })
-  // The same account, connected in another workspace: Google would revoke
-  // that workspace's tokens too
+  // The same account, connected in another workspace: a provider that revokes
+  // the whole grant would revoke that workspace's tokens too
   const elsewhere = await ctx.connectionService.create({
     teamId: 'team_2',
     provider: 'fake',

@@ -154,7 +154,7 @@ const apiKeyApp = {
 const oauthApp = {
   id: 'sheets',
   name: 'Sheets',
-  auth: { type: 'oauth2', provider: 'google', providerName: 'Google' },
+  auth: { type: 'oauth2', provider: 'example', providerName: 'Example' },
   settings: [],
   integration: undefined
 } as unknown as IntegratedAppType
@@ -195,8 +195,8 @@ test('shows only the masked hint of a saved API key', async () => {
 const connections = [
   {
     id: 'c1',
-    provider: 'google',
-    providerName: 'Google',
+    provider: 'example',
+    providerName: 'Example',
     accountEmail: 'ann@example.com',
     connectedBy: 'Ann',
     status: 1,
@@ -204,8 +204,8 @@ const connections = [
   },
   {
     id: 'c2',
-    provider: 'google',
-    providerName: 'Google',
+    provider: 'example',
+    providerName: 'Example',
     accountEmail: 'ben@example.com',
     connectedBy: 'Ben',
     status: 2,
@@ -213,8 +213,8 @@ const connections = [
   },
   {
     id: 'c3',
-    provider: 'google',
-    providerName: 'Google',
+    provider: 'example',
+    providerName: 'Example',
     accountEmail: 'cat@example.com',
     connectedBy: 'Cat',
     status: 1,
@@ -230,7 +230,7 @@ test('asks to connect an OAuth2 account until the workspace has one', async () =
   expect(needsAccountConnection(apiKeyApp)).toBe(false)
 
   await act(async () => root.render(<ConnectAccount app={oauthApp} formId="form_1" />))
-  expect(container.querySelector('button')?.textContent).toBe('Connect Google account')
+  expect(container.querySelector('button')?.textContent).toBe('Connect Example account')
 })
 
 test('asks to reconnect when the connection stopped working', async () => {
@@ -240,7 +240,7 @@ test('asks to reconnect when the connection stopped working', async () => {
   }
 
   await act(async () => root.render(<ConnectAccount app={app} formId="form_1" />))
-  expect(container.querySelector('button')?.textContent).toBe('Reconnect Google account')
+  expect(container.querySelector('button')?.textContent).toBe('Reconnect Example account')
   expect(container.textContent).toContain('Deliveries are paused')
 })
 
@@ -270,7 +270,7 @@ test('picks one of the workspace accounts or connects another', async () => {
   ])
   expect(container.querySelector('label')?.textContent).toBe('Account')
   expect(container.textContent).toContain('Accounts are shared with everyone in this workspace.')
-  expect(container.textContent).toContain('Connect another Google account')
+  expect(container.textContent).toContain('Connect another Example account')
 })
 
 test('offers to retry when the accounts fail to load', async () => {
@@ -418,7 +418,7 @@ test('shows submissions waiting for the account to be reconnected', async () => 
             attempt: 1,
             maxAttempts: 3,
             willRetry: false,
-            error: 'Google rejected the token request: invalid_grant',
+            error: 'Example rejected the token request: invalid_grant',
             createdAt: now - 60
           }
         ]}

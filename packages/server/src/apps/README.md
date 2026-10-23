@@ -101,8 +101,8 @@ export default defineApp({
   // ...
   auth: {
     type: 'oauth2',
-    provider: 'google',
-    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    provider: 'example',
+    scopes: ['rows.write']
   },
   run: async ({ auth, config, submission }) => {
     await got.post('https://api.example.com/rows', {
@@ -115,21 +115,39 @@ export default defineApp({
 
 ### OAuth2
 
-`provider` is the id of a provider in `oauth2-providers.ts` (only `google` so far). To add one,
-give its authorize, token and OpenID Connect userinfo URLs there, the scopes that let the userinfo
-endpoint identify the account (`identityScopes`, e.g. `openid email`), and its revoke URL
-(RFC 7009) if it has one. Each install registers its own OAuth app with the provider:
+`provider` is the id of a provider in `oauth2-providers.ts`. None ships yet; an app naming a
+provider that isn't there is hidden, like one whose provider has no credentials. To add one, give
+its authorize, token and OpenID Connect userinfo URLs, the scopes that let the userinfo endpoint
+identify the account (`identityScopes`, e.g. `openid email`), and its revoke URL (RFC 7009) if it
+has one, then add it to `oauth2Providers`:
+
+```ts
+export const example: OAuth2Provider = {
+  id: 'example',
+  name: 'Example', // the button reads "Connect Example account"
+  authorizeUrl: 'https://auth.example.com/oauth2/authorize',
+  tokenUrl: 'https://auth.example.com/oauth2/token',
+  userInfoUrl: 'https://auth.example.com/oauth2/userinfo',
+  identityScopes: ['openid', 'email'],
+  revokeUrl: 'https://auth.example.com/oauth2/revoke',
+  pkce: true
+}
+
+export const oauth2Providers: Record<string, OAuth2Provider> = {
+  example
+}
+```
+
+**Who configures what.** The OAuth client belongs to the installation, not to each form owner,
+like `GOOGLE_LOGIN_CLIENT_ID` for login with Google. Whoever runs the server registers one OAuth
+client per provider, once:
 
 - set `<PROVIDER>_INTEGRATION_CLIENT_ID` and `<PROVIDER>_INTEGRATION_CLIENT_SECRET`, e.g.
-  `GOOGLE_INTEGRATION_CLIENT_ID`;
+  `EXAMPLE_INTEGRATION_CLIENT_ID` for the provider `example`;
 - register `${APP_HOMEPAGE_URL}/api/integrations/oauth/callback` as the redirect URI.
 
-Until both variables are set, apps using that provider are hidden.
-
-For Google, set the OAuth consent screen's publishing status to **In production** (it can stay
-unverified for your own users, who'll see an "unverified app" warning) or make it **Internal** if
-everyone is in your Google Workspace. In **Testing**, Google expires refresh tokens after 7 days, so
-every connection would need reconnecting weekly.
+Form owners then only click **Connect <provider> account** and sign in. Until both variables are
+set, apps using that provider are hidden.
 
 **Connections belong to the workspace.** Connecting an account stores it once for the form's
 workspace (team), identified by the provider's account id (`sub`), with its email shown to the team.
@@ -142,9 +160,9 @@ The workspace's settings list its connected accounts, the forms using each, and 
 member who connected an account, or the workspace owner, can disconnect it. Disconnecting revokes
 the grant at the provider's revoke URL, best effort (a failure is logged without the token and never
 stops the disconnect), deletes the tokens, and leaves the integrations that used it needing
-reconnection until someone picks another account. Google revokes the whole grant, i.e. every token
-this server holds for that account, so the grant isn't revoked while another workspace on the
-server still has the same account connected. Deleting an integration doesn't touch the connection.
+reconnection until someone picks another account. Some providers (Google, for one) revoke the
+whole grant, i.e. every token this server holds for that account, so the grant isn't revoked while
+another workspace on the server still has the same account connected. Deleting an integration doesn't touch the connection.
 
 When a job runs, HeyForm refreshes the connection's access token if it has expired (there's no
 scheduled refresh). One refresh runs at a time per connection (a Redis lock), and the others use

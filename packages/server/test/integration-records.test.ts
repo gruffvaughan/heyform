@@ -99,7 +99,7 @@ async function testAuthFailuresAreFinal() {
   // Not fixed by reconnecting (an install problem), so not kept waiting
   await queue.recordFailure(
     createJob(1, 5),
-    new IntegrationAuthError('Google rejected the token request: invalid_client')
+    new IntegrationAuthError('Fake rejected the token request: invalid_client')
   )
 
   assert.strictEqual(records[0].willRetry, false)
@@ -590,7 +590,7 @@ async function testReconnectFailuresWaitInsteadOfFailing() {
 
   await recordingQueue.recordFailure(
     createJob(2, 3),
-    new IntegrationAuthError('Google rejected the token request: invalid_grant', true)
+    new IntegrationAuthError('Fake rejected the token request: invalid_grant', true)
   )
   assert.deepStrictEqual(records, [], 'not recorded as a spent failure')
   assert.deepStrictEqual(resends, ['integration_1'])

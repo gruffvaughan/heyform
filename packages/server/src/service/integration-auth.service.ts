@@ -6,20 +6,22 @@ import { AppService } from './app.service'
 import { IntegrationConnectionService } from './integration-connection.service'
 import { IntegrationService } from './integration.service'
 import { RedisService } from './redis.service'
-import { APP_HOMEPAGE_URL, FORM_ENCRYPTION_KEY } from '@environments'
+import { APP_HOMEPAGE_URL } from '@environments'
 import {
   IntegrationConnectionModel,
   IntegrationConnectionStatusEnum,
   IntegrationModel,
   IntegrationStatusEnum
 } from '@model'
-import { Logger, decryptSecret, encryptSecret, mapToObject } from '@utils'
+import { Logger, mapToObject } from '@utils'
 
 import { ConfiguredOAuth2Provider } from '../apps/oauth2-providers'
 import { AppDefinition, AppRunAuth } from '../apps/types'
+import { IntegrationSecrets } from './integration-secrets'
 
 export const INTEGRATION_OAUTH_CALLBACK_PATH = '/api/integrations/oauth/callback'
 
+const ENCRYPTION_KEYS = 'INTEGRATION_ENCRYPTION_KEY or INTEGRATION_ENCRYPTION_KEY_PREVIOUS'
 const STATE_TTL = '10m'
 const TOKEN_REQUEST_TIMEOUT = 15_000
 // Revocation is best effort, so it shouldn't hold up disconnecting
@@ -111,6 +113,11 @@ export class IntegrationAuthService {
     private readonly redisService: RedisService
   ) {}
 
+  // Encrypts API keys and tokens with INTEGRATION_ENCRYPTION_KEY
+  get secrets(): IntegrationSecrets {
+    return this.appService.secrets
+  }
+
   get redirectUri(): string {
     return new URL(INTEGRATION_OAUTH_CALLBACK_PATH, APP_HOMEPAGE_URL).toString()
   }
@@ -119,7 +126,7 @@ export class IntegrationAuthService {
 
   encryptApiKey(apiKey: string): Pick<IntegrationModel, 'apiKey' | 'apiKeyHint'> {
     return {
-      apiKey: encryptSecret(apiKey, FORM_ENCRYPTION_KEY),
+      apiKey: this.secrets.encrypt(apiKey),
       apiKeyHint: maskApiKey(apiKey)
     }
   }
@@ -133,7 +140,7 @@ export class IntegrationAuthService {
   private requireProvider(app: AppDefinition): ConfiguredOAuth2Provider {
     const provider = this.appService.findOAuth2Provider(app)
 
-    if (!provider) {
+    if (!provider || !this.appService.isAvailable(app)) {
       throw new BadRequestException(`${app.name} is not available on this server`)
     }
 
@@ -517,6 +524,11 @@ export class IntegrationAuthService {
    * when retrying can't help.
    */
   async getRunAuth(app: AppDefinition, integration: IntegrationModel): Promise<AppRunAuth> {
+    // An install problem, not the form owner's: no reconnecting can fix it
+    if (app.auth.type !== 'none' && !this.secrets.isConfigured) {
+      throw new IntegrationAuthError('INTEGRATION_ENCRYPTION_KEY is not set on this server')
+    }
+
     switch (app.auth.type) {
       case 'apiKey':
         return { type: 'apiKey', apiKey: await this.readApiKey(integration) }
@@ -535,13 +547,14 @@ export class IntegrationAuthService {
     }
 
     try {
-      return decryptSecret(integration.apiKey, FORM_ENCRYPTION_KEY)
+      return this.secrets.decrypt(integration.apiKey)
     } catch (_) {
-      // e.g. FORM_ENCRYPTION_KEY changed. Like unreadable OAuth2 tokens, the
-      // form owner has to enter it again; submissions wait until then.
+      // e.g. INTEGRATION_ENCRYPTION_KEY changed without keeping the old one as
+      // INTEGRATION_ENCRYPTION_KEY_PREVIOUS. Like unreadable OAuth2 tokens,
+      // the key has to be entered again; submissions wait until then.
       return this.needsReconnect(
         integration,
-        'The saved API key cannot be read',
+        `The saved API key can't be decrypted with ${ENCRYPTION_KEYS}`,
         'Enter it again to resume deliveries.'
       )
     }
@@ -621,7 +634,10 @@ export class IntegrationAuthService {
     const tokens = this.readTokens(connection)
 
     if (!tokens) {
-      return this.connectionNeedsReconnect(connection, `The ${provider.name} tokens cannot be read`)
+      return this.connectionNeedsReconnect(
+        connection,
+        `The ${provider.name} tokens can't be decrypted with ${ENCRYPTION_KEYS}`
+      )
     }
 
     if (tokens.accessToken && !this.isExpired(tokens)) {
@@ -742,11 +758,11 @@ export class IntegrationAuthService {
     const stored: Record<string, any> = {}
 
     if (tokens.accessToken) {
-      stored.accessToken = encryptSecret(tokens.accessToken, FORM_ENCRYPTION_KEY)
+      stored.accessToken = this.secrets.encrypt(tokens.accessToken)
     }
 
     if (tokens.refreshToken) {
-      stored.refreshToken = encryptSecret(tokens.refreshToken, FORM_ENCRYPTION_KEY)
+      stored.refreshToken = this.secrets.encrypt(tokens.refreshToken)
     }
 
     if (tokens.expiresAt) {
@@ -762,12 +778,8 @@ export class IntegrationAuthService {
 
     try {
       return {
-        accessToken: stored.accessToken
-          ? decryptSecret(stored.accessToken, FORM_ENCRYPTION_KEY)
-          : undefined,
-        refreshToken: stored.refreshToken
-          ? decryptSecret(stored.refreshToken, FORM_ENCRYPTION_KEY)
-          : undefined,
+        accessToken: stored.accessToken ? this.secrets.decrypt(stored.accessToken) : undefined,
+        refreshToken: stored.refreshToken ? this.secrets.decrypt(stored.refreshToken) : undefined,
         expiresAt: Number(stored.expiresAt) || undefined
       }
     } catch (_) {

@@ -119,6 +119,14 @@ function storedSecretKey(secret: string): Buffer {
 }
 
 /**
+ * A short, stable id for a key, so stored values can say which key encrypted
+ * them. It's a fingerprint of the derived key, not the key itself.
+ */
+export function secretKeyId(secret: string): string {
+  return crypto.createHash('sha256').update(storedSecretKey(secret)).digest('hex').slice(0, 8)
+}
+
+/**
  * Encrypts a credential (API key, OAuth token) for storage. Unlike
  * aesEncrypt(), which derives a fixed IV from the key, every call uses a fresh
  * random IV and AES-GCM, so equal inputs give different outputs and tampered

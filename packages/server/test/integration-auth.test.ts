@@ -6,7 +6,7 @@ import { AddressInfo } from 'net'
 import type { AppDefinition } from '../src/apps/types'
 
 // Set before the server modules read them
-process.env.FORM_ENCRYPTION_KEY = 'integration-auth-test-key'
+process.env.INTEGRATION_ENCRYPTION_KEY = 'integration-auth-test-key'
 process.env.APP_HOMEPAGE_URL = 'https://heyform.example.com'
 process.env.FAKE_INTEGRATION_CLIENT_ID = 'fake-client-id'
 process.env.FAKE_INTEGRATION_CLIENT_SECRET = 'fake-client-secret'
@@ -44,6 +44,8 @@ const {
 } = require('../src/resolver/integration/disconnect-integration-connection.resolver')
 const { IntegrationOAuthController } = require('../src/controller/integration-oauth.controller')
 const { decryptSecret, encryptSecret } = require('../src/utils/crypto')
+const { IntegrationSecrets, integrationSecrets } = require('../src/service/integration-secrets')
+const { secretKeyId } = require('../src/utils/crypto')
 const { IntegrationStatusEnum } = require('../src/model/integration.model')
 const { IntegrationConnectionStatusEnum } = require('../src/model/integration-connection.model')
 const webhook = require('../src/apps/webhook').default
@@ -353,11 +355,9 @@ function encryptTokens(tokens: {
   refreshToken?: string
   expiresAt?: number
 }) {
-  const key = process.env.FORM_ENCRYPTION_KEY!
-
   return {
-    accessToken: tokens.accessToken ? encryptSecret(tokens.accessToken, key) : undefined,
-    refreshToken: tokens.refreshToken ? encryptSecret(tokens.refreshToken, key) : undefined,
+    accessToken: tokens.accessToken ? integrationSecrets.encrypt(tokens.accessToken) : undefined,
+    refreshToken: tokens.refreshToken ? integrationSecrets.encrypt(tokens.refreshToken) : undefined,
     expiresAt: tokens.expiresAt
   }
 }
@@ -398,12 +398,11 @@ async function connect(
 
 function storedTokens(ctx: ReturnType<typeof createAuth>, connectionId: string) {
   const tokens = ctx.connections.get(connectionId).tokens
-  const key = process.env.FORM_ENCRYPTION_KEY!
 
   return {
     raw: tokens,
-    accessToken: tokens.accessToken && decryptSecret(tokens.accessToken, key),
-    refreshToken: tokens.refreshToken && decryptSecret(tokens.refreshToken, key),
+    accessToken: tokens.accessToken && integrationSecrets.decrypt(tokens.accessToken),
+    refreshToken: tokens.refreshToken && integrationSecrets.decrypt(tokens.refreshToken),
     expiresAt: tokens.expiresAt
   }
 }
@@ -646,7 +645,7 @@ async function testUnreadableApiKeyNeedsANewKey() {
     appId: 'keyapp',
     config: { list: 'a' },
     status: IntegrationStatusEnum.ACTIVE,
-    // Encrypted with a FORM_ENCRYPTION_KEY that has since changed
+    // Encrypted with an INTEGRATION_ENCRYPTION_KEY that has since changed
     apiKey: encryptSecret('k', 'other-key'),
     apiKeyHint: '••••'
   })
@@ -1591,6 +1590,33 @@ async function testExpiredTokenIsRefreshed() {
   assert.strictEqual(provider.requests.length, 0)
 }
 
+async function testRefreshMovesTokensToTheCurrentKey() {
+  const ctx = createAuth()
+  // Connected before the key was rotated
+  const { connectionId, integration } = await connect(ctx, {
+    accessToken: 'access-old',
+    refreshToken: 'refresh-1',
+    expiresAt: Date.now() - 1000
+  })
+  ctx.appService.secrets = new IntegrationSecrets(
+    'rotated-key',
+    process.env.INTEGRATION_ENCRYPTION_KEY
+  )
+  provider.handler = () => ({ status: 200, body: { access_token: 'access-new', expires_in: 3600 } })
+
+  assert.strictEqual(await ctx.service.getAccessToken(oauthApp, integration), 'access-new')
+
+  const tokens = ctx.connections.get(connectionId).tokens
+  const rotatedId = secretKeyId('rotated-key')
+  assert.ok(tokens.accessToken.startsWith(`${rotatedId}:`))
+  // The kept refresh token is re-encrypted too
+  assert.ok(tokens.refreshToken.startsWith(`${rotatedId}:`))
+  assert.strictEqual(
+    new IntegrationSecrets('rotated-key').decrypt(tokens.refreshToken),
+    'refresh-1'
+  )
+}
+
 async function testOneRefreshServesEveryIntegration() {
   const ctx = createAuth()
   const { connectionId, integration } = await connect(ctx, {
@@ -1799,7 +1825,9 @@ async function testMissingOrUnreadableConnectionNeedsReconnect() {
     (error: any) =>
       error instanceof IntegrationAuthError &&
       error.needsReconnect &&
-      /tokens cannot be read/.test(error.message)
+      /tokens can't be decrypted with INTEGRATION_ENCRYPTION_KEY or INTEGRATION_ENCRYPTION_KEY_PREVIOUS/.test(
+        error.message
+      )
   )
   assert.strictEqual(ctx.connections.get(connectionId).status, CONNECTION_NEEDS_RECONNECT)
   assert.strictEqual(ctx.integrations.get(integrationId).status, NEEDS_RECONNECT)
@@ -2083,6 +2111,7 @@ async function run() {
     await testTurningOnResendsWaitingSubmissions()
     await testValidTokenIsUsedWithoutRefresh()
     await testExpiredTokenIsRefreshed()
+    await testRefreshMovesTokensToTheCurrentKey()
     await testOneRefreshServesEveryIntegration()
     await testRevokedGrantMarksTheConnection()
     await testReconnectDuringRefreshIsNotARevocation()

@@ -240,7 +240,11 @@ function createRecordModel() {
   let clock = Date.parse('2026-10-23T10:00:00.000Z')
   const docs: any[] = []
   const matches = (doc: any, filter: Record<string, any>) =>
-    Object.entries(filter).every(([key, value]) => doc[key] === value)
+    Object.entries(filter).every(([key, value]) =>
+      value && typeof value === 'object' && '$ne' in value
+        ? doc[key] !== value.$ne
+        : doc[key] === value
+    )
   const insert = (fields: any) => {
     const doc = { _id: `record_${nextId++}`, createdAt: new Date(clock++), ...fields }
     docs.push(doc)
@@ -310,6 +314,9 @@ function createBullQueue() {
         data,
         opts,
         state: 'waiting',
+        // Set by a test to what happens to a running job
+        onFinished: async () => undefined,
+        finished: async () => job.onFinished(),
         getState: async () => job.state,
         remove: async () => {
           jobs.delete(job.id)
@@ -527,25 +534,145 @@ async function testWaitingAfterAReconnectIsSentStraightAway() {
   assert.deepStrictEqual(waitingIds(), [])
 }
 
+function createHoldingQueue(holdForReconnect: (input: any, resend: boolean) => Promise<any>) {
+  const app = { id: 'webhook', run: async () => undefined }
+  const integrationService = {
+    findById: async () => ({ id: 'integration_1', status: NEEDS_RECONNECT, config: {} }),
+    holdForReconnect
+  }
+
+  return new IntegrationQueue(
+    { findById: () => app },
+    integrationService,
+    { getRunAuth: async () => ({ type: 'none' }) },
+    { findById: async () => ({ id: 'submission_1' }) },
+    { findById: async () => ({ id: 'form_1' }) }
+  )
+}
+
+function createRunningJob(attemptsMade: number, attempts: number) {
+  const job: any = {
+    ...createJob(attemptsMade, attempts),
+    discarded: false,
+    discard: async () => {
+      job.discarded = true
+    }
+  }
+  return job
+}
+
 async function testReconnectFailuresWaitInsteadOfFailing() {
   const held: any[] = []
-  const { queue, records } = createQueue()
-  ;(queue as any).integrationService.holdForReconnect = async (input: any) => held.push(input)
+  const queue = createHoldingQueue(async (input, resend) => held.push([input, resend]))
+  const job = createRunningJob(1, 3)
 
-  await queue.recordFailure(
-    createJob(1, 3),
+  await assert.rejects(queue.process(job), IntegrationAuthError)
+  assert.strictEqual(job.discarded, true)
+  assert.deepStrictEqual(held, [
+    [
+      {
+        ...JOB_DATA,
+        attempt: 2,
+        maxAttempts: 3,
+        error: 'The account needs reconnecting before deliveries resume'
+      },
+      // Resent after the job has failed, not while it's still running
+      false
+    ]
+  ])
+
+  // Its failure isn't recorded as spent; if the account was reconnected in
+  // the meantime, the submission is sent now
+  const resends: string[] = []
+  const { queue: recordingQueue, records } = createQueue()
+  ;(recordingQueue as any).integrationService.resendIfActive = async (id: string) =>
+    resends.push(id)
+
+  await recordingQueue.recordFailure(
+    createJob(2, 3),
     new IntegrationAuthError('Google rejected the token request: invalid_grant', true)
   )
-
   assert.deepStrictEqual(records, [], 'not recorded as a spent failure')
-  assert.deepStrictEqual(held, [
-    {
-      ...JOB_DATA,
-      attempt: 1,
-      maxAttempts: 3,
-      error: 'Google rejected the token request: invalid_grant'
-    }
-  ])
+  assert.deepStrictEqual(resends, ['integration_1'])
+}
+
+async function testAFailedHoldLeavesTheJobRetryable() {
+  const queue = createHoldingQueue(async () => {
+    throw new Error('mongo down')
+  })
+  const job = createRunningJob(0, 3)
+
+  await assert.rejects(queue.process(job), /mongo down/)
+  assert.strictEqual(job.discarded, false, 'Bull tries again')
+
+  // ...and on its last attempt, it's recorded as an ordinary failure
+  const { queue: recordingQueue, records } = createQueue()
+  await recordingQueue.recordFailure(createJob(3, 3), new Error('mongo down'))
+  assert.deepStrictEqual(
+    [records[0].status, records[0].willRetry, records[0].error],
+    [FAILED, false, 'mongo down']
+  )
+}
+
+async function testResendWaitsForTheJobThatIsFailing() {
+  const { service, bull, integration, waitingIds, logged } = createWaitingService()
+
+  // The job is running and has just put its submission on hold
+  const running = await bull.add(waitingInput('submission_1'), {
+    jobId: 'integration_1-submission_1'
+  })
+  running.state = 'active'
+  running.onFinished = async () => {
+    running.state = 'failed'
+    throw new Error('needs reconnecting')
+  }
+  bull.added.length = 0
+  await service.holdForReconnect(waitingInput('submission_1'), false)
+
+  integration.status = ACTIVE
+  assert.strictEqual(await service.resendWaiting(integration), 1)
+  assert.deepStrictEqual(
+    bull.added.map(job => job.data.submissionId),
+    ['submission_1']
+  )
+  assert.deepStrictEqual(waitingIds(), [])
+
+  // A job that doesn't finish keeps the submission waiting
+  const stuck = createWaitingService()
+  const job = await stuck.bull.add(waitingInput('submission_2'), {
+    jobId: 'integration_1-submission_2'
+  })
+  job.state = 'active'
+  await stuck.service.holdForReconnect(waitingInput('submission_2'), false)
+  stuck.integration.status = ACTIVE
+
+  assert.strictEqual(await stuck.service.resendWaiting(stuck.integration), 0)
+  assert.deepStrictEqual(stuck.waitingIds(), ['submission_2'])
+  assert.match(stuck.logged[0], /still running/)
+  assert.deepStrictEqual(logged, [])
+}
+
+async function testAnAlreadyWaitingSubmissionIsNotCapped() {
+  const { service, recordModel } = createWaitingService()
+
+  for (let i = 0; i < MAX_WAITING_RECORDS - 1; i++) {
+    recordModel.docs.push({
+      _id: `old_${i}`,
+      integrationId: 'integration_1',
+      submissionId: `old_${i}`,
+      status: WAITING,
+      createdAt: new Date(i)
+    })
+  }
+
+  assert.strictEqual(await service.holdForReconnect(waitingInput('submission_1')), true)
+  // At the cap now, but this one is already waiting
+  assert.strictEqual(await service.holdForReconnect(waitingInput('submission_1')), true)
+  assert.strictEqual(
+    recordModel.docs.filter(doc => doc.status === FAILED).length,
+    0,
+    'no false failure'
+  )
 }
 
 async function testDeletingDiscardsWaitingSubmissions() {
@@ -682,6 +809,9 @@ async function run() {
   await testResendFailureKeepsTheSubmissionWaiting()
   await testWaitingAfterAReconnectIsSentStraightAway()
   await testReconnectFailuresWaitInsteadOfFailing()
+  await testAFailedHoldLeavesTheJobRetryable()
+  await testResendWaitsForTheJobThatIsFailing()
+  await testAnAlreadyWaitingSubmissionIsNotCapped()
   await testDeletingDiscardsWaitingSubmissions()
   testWaitingRecordsDoNotExpire()
   await testFormIntegrationsReportWaitingCount()

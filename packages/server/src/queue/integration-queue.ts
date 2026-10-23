@@ -71,8 +71,23 @@ export class IntegrationQueue extends BaseQueue {
           // Not the app's result, which Bull would store in Redis
           return
         } catch (err) {
-          // Retrying with the same credentials can't succeed
           if (err instanceof IntegrationAuthError) {
+            // Kept for when the account is reconnected. If that fails, the
+            // error below replaces the auth error and Bull retries the job.
+            if (err.needsReconnect) {
+              await this.integrationService.holdForReconnect(
+                {
+                  ...job.data,
+                  // attemptsMade doesn't include this attempt yet
+                  attempt: (job.attemptsMade || 0) + 1,
+                  maxAttempts: job.opts?.attempts || 1,
+                  error: err.message
+                },
+                false
+              )
+            }
+
+            // Retrying with the same credentials can't succeed
             await job.discard()
           }
 
@@ -98,17 +113,13 @@ export class IntegrationQueue extends BaseQueue {
   async recordFailure(job: Job<IntegrationQueueJob>, error: Error) {
     const maxAttempts = job.opts.attempts || 1
 
-    // Not a spent delivery: it's sent again once the account is reconnected
+    // Not a spent delivery: process() kept it waiting for a reconnect. If the
+    // account was reconnected while the job ran, send it now that it's failed.
     if (error instanceof IntegrationAuthError && error.needsReconnect) {
       try {
-        await this.integrationService.holdForReconnect({
-          ...job.data,
-          attempt: job.attemptsMade,
-          maxAttempts,
-          error: error.message
-        })
+        await this.integrationService.resendIfActive(job.data.integrationId)
       } catch (err: any) {
-        this.logger.error(`Couldn't keep ${job.queue?.name}#${job.id} waiting: ${err?.message}`)
+        this.logger.error(`Couldn't resend ${job.queue?.name}#${job.id}: ${err?.message}`)
       }
 
       return

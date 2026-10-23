@@ -88,6 +88,8 @@ function createStores() {
   const redis = new Map<string, string>()
   // Integrations whose waiting submissions were resent
   const resent: string[] = []
+  // Submissions kept waiting for a reconnect
+  const held: any[] = []
 
   const integrationService = {
     findById: async (id: string) => integrations.get(id) ?? null,
@@ -115,6 +117,10 @@ function createStores() {
       return integrationService.create({ formId, appId, ...updates })
     },
     countWaiting: async () => 0,
+    holdForReconnect: async (input: any) => {
+      held.push(input)
+      return true
+    },
     resendWaiting: async (integration: any) => {
       resent.push(integration.id)
       return 0
@@ -155,6 +161,7 @@ function createStores() {
     oauthRecords,
     redis,
     resent,
+    held,
     integrationService,
     thirdPartyService,
     redisService
@@ -976,6 +983,11 @@ async function testJobStopsRetryingWhenReconnectIsNeeded() {
   assert.strictEqual(job.discarded, true, 'no further attempts')
   assert.strictEqual(runs.length, 0)
   assert.strictEqual(ctx.integrations.get(integrationId).status, NEEDS_RECONNECT)
+  assert.deepStrictEqual(
+    ctx.held.map(input => [input.submissionId, input.attempt]),
+    [['submission_1', 1]],
+    'kept for the reconnect'
+  )
 
   // Jobs already queued fail straight away, without calling the provider
   provider.requests = []

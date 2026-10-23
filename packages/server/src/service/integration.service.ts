@@ -20,6 +20,9 @@ import { AppDefinition } from '../apps/types'
 // Longest error message kept on a delivery record
 const RECORD_ERROR_MAX_LENGTH = 500
 
+// How long a resend waits for a job of the same submission that's still running
+const RUNNING_JOB_WAIT = 2 * 60_000
+
 function shortenError(error?: string): string | undefined {
   return error && error.length > RECORD_ERROR_MAX_LENGTH
     ? `${error.slice(0, RECORD_ERROR_MAX_LENGTH - 1)}…`
@@ -186,14 +189,21 @@ export class IntegrationService {
    * needs reconnecting, so it's sent once the account is reconnected. Past
    * MAX_WAITING_RECORDS, the submission is recorded as failed instead.
    * Returns whether the submission is waiting.
+   *
+   * If the account was reconnected meanwhile, the reconnect may have resent
+   * the waiting submissions before this one was recorded, so it's resent
+   * straight away. A job holding its own submission skips that and resends
+   * once it has failed (see IntegrationQueue.recordFailure).
    */
-  async holdForReconnect(input: WaitingRecordInput): Promise<boolean> {
+  async holdForReconnect(input: WaitingRecordInput, resendIfActive = true): Promise<boolean> {
     const { formId, appId, integrationId, submissionId } = input
     const attempt = input.attempt ?? 0
     const maxAttempts = Math.max(input.maxAttempts ?? 1, attempt)
     const waiting = await this.integrationRecordModel.countDocuments({
       integrationId,
-      status: IntegrationRecordStatusEnum.WAITING
+      status: IntegrationRecordStatusEnum.WAITING,
+      // One that's already waiting doesn't count against the cap
+      submissionId: { $ne: submissionId }
     })
 
     if (waiting >= MAX_WAITING_RECORDS) {
@@ -232,15 +242,19 @@ export class IntegrationService {
       }
     }
 
-    // If the account was reconnected meanwhile, the reconnect may have
-    // resent the waiting submissions before this one was recorded
+    if (resendIfActive) {
+      await this.resendIfActive(integrationId)
+    }
+
+    return true
+  }
+
+  async resendIfActive(integrationId: string): Promise<void> {
     const integration = await this.findById(integrationId)
 
     if (integration?.status === IntegrationStatusEnum.ACTIVE) {
       await this.resendWaiting(integration)
     }
-
-    return true
   }
 
   async countWaiting(integrationId: string): Promise<number> {
@@ -312,9 +326,23 @@ export class IntegrationService {
     const existing = await this.integrationQueue.getJob(jobId)
 
     if (existing) {
-      const state = await existing.getState()
+      let state = await existing.getState()
 
-      // Still queued or running, so it will be delivered
+      // A job that's running while its submission waits is the one that put
+      // it on hold and is about to fail; queue it again once it has
+      if (state === 'active') {
+        await Promise.race([
+          existing.finished().catch(() => undefined),
+          new Promise(resolve => setTimeout(resolve, RUNNING_JOB_WAIT).unref?.())
+        ])
+        state = await existing.getState()
+
+        if (state === 'active') {
+          throw new Error(`Job ${jobId} is still running`)
+        }
+      }
+
+      // Still queued, so it will be delivered
       if (state !== 'failed' && state !== 'completed') {
         return
       }

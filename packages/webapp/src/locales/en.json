@@ -1135,7 +1135,8 @@
         "accountNeedsReconnect": "{{label}} · needs reconnecting",
         "accountMissingAccess": "{{label}} · doesn't allow {{app}} yet",
         "connectAnother": "Connect another {{name}} account",
-        "accountShared": "Accounts are shared with everyone in this workspace."
+        "accountShared": "Accounts are shared with everyone in this workspace.",
+        "accountsFailed": "Couldn't load the workspace's accounts."
       },
       "records": {
         "title": "Recent deliveries",

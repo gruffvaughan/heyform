@@ -16,7 +16,8 @@ import i18n from '../src/i18n'
 import {
   ApiKeyItem,
   ConnectAccount,
-  ConnectionItem
+  ConnectionItem,
+  ConnectionsLoadFailed
 } from '../src/pages/form/Integrations/IntegrationAuthItem'
 import {
   IntegrationRecordList,
@@ -270,6 +271,15 @@ test('picks one of the workspace accounts or connects another', async () => {
   expect(container.querySelector('label')?.textContent).toBe('Account')
   expect(container.textContent).toContain('Accounts are shared with everyone in this workspace.')
   expect(container.textContent).toContain('Connect another Google account')
+})
+
+test('offers to retry when the accounts fail to load', async () => {
+  let retries = 0
+  await act(async () => root.render(<ConnectionsLoadFailed onRetry={() => retries++} />))
+
+  expect(container.textContent).toContain("Couldn't load the workspace's accounts.")
+  await act(async () => container.querySelector('button')!.click())
+  expect(retries).toBe(1)
 })
 
 test('lists the connected accounts in the workspace settings', async () => {

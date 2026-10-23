@@ -1133,7 +1133,8 @@
         "accountNeedsReconnect": "{{label}} · 需要重新连接",
         "accountMissingAccess": "{{label}} · 尚未允许 {{app}} 访问",
         "connectAnother": "连接其他 {{name}} 账号",
-        "accountShared": "账号对此工作区的所有成员共享。"
+        "accountShared": "账号对此工作区的所有成员共享。",
+        "accountsFailed": "无法加载工作区的账号。"
       },
       "records": {
         "title": "最近发送记录",

@@ -79,6 +79,12 @@ export function getDefaultConnectionId(
   )
 }
 
+// Whether the picker starts on an account the integration doesn't have yet,
+// so there's something to save before anything else is changed
+export function startsOnNewAccount(app: IntegratedAppType, connectionId?: string): boolean {
+  return !!connectionId && connectionId !== app.integration?.connectionId
+}
+
 // "<email> (connected by <name>)", and why it can't be used, if it can't
 export function getConnectionLabel(
   t: TFunction,

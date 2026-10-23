@@ -9,7 +9,8 @@ import {
   getIntegrationAuthorizeUrl,
   getIntegrationDefaultConfig,
   getIntegrationSetting,
-  needsAccountConnection
+  needsAccountConnection,
+  startsOnNewAccount
 } from '../src/pages/form/Integrations/utils'
 
 import { Form } from '../src/components'
@@ -294,6 +295,19 @@ test('starts the picker on a usable account', () => {
   expect(getDefaultConnectionId(oauthApp, [cat, ben])).toBe('c2')
   expect(getDefaultConnectionId(oauthApp, [cat])).toBeUndefined()
   expect(getDefaultConnectionId(oauthApp, [])).toBeUndefined()
+})
+
+test('lets a new account be saved without another change', () => {
+  // A new integration, or one whose account is gone, starts with an account to save
+  expect(startsOnNewAccount(oauthApp, 'c1')).toBe(true)
+  expect(
+    startsOnNewAccount({ ...oauthApp, integration: { connectionId: 'gone' } } as any, 'c1')
+  ).toBe(true)
+  // The integration's own account, or none, waits for a change
+  expect(
+    startsOnNewAccount({ ...oauthApp, integration: { connectionId: 'c1' } } as any, 'c1')
+  ).toBe(false)
+  expect(startsOnNewAccount(oauthApp, undefined)).toBe(false)
 })
 
 test('offers to retry when the accounts fail to load', async () => {

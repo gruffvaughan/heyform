@@ -148,6 +148,16 @@ queue: {
 Credential errors that a retry can't fix (no API key saved, a revoked OAuth grant) fail the job
 without further attempts.
 
+## Delivery log
+
+Every attempt is recorded in `IntegrationRecordModel`: whether it succeeded, the attempt number,
+whether the queue will retry, and the error message of a failure (shortened to 500 characters).
+The form owner sees the 20 most recent records in the integration's settings. Records are kept for
+30 days and deleted with the integration.
+
+The error message of whatever `run` throws is shown to the form owner, so keep secrets and
+submission data out of it.
+
 ## Translations
 
 The webapp looks labels up under `form.integrations.apps.<id>` and falls back to the English in the

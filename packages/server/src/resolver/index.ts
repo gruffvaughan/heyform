@@ -39,6 +39,9 @@ export { UpdateIntegrationSettingsResolver } from './integration/update-integrat
 export { DeleteIntegrationSettingsResolver } from './integration/delete-integration-settings.resolver'
 export { UpdateIntegrationStatusResolver } from './integration/update-integration-status.resolver'
 export { IntegrationRecordsResolver } from './integration/integration-records.resolver'
+export { IntegrationConnectionsResolver } from './integration/integration-connections.resolver'
+export { TeamIntegrationConnectionsResolver } from './integration/team-integration-connections.resolver'
+export { DisconnectIntegrationConnectionResolver } from './integration/disconnect-integration-connection.resolver'
 
 export { FormsResolver } from './form/forms.resolver'
 export { SearchFormsResolver } from './form/search-forms.resolver'

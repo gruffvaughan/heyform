@@ -20,7 +20,8 @@ export class FormIntegrationsResolver {
         appId: integration.appId,
         config: integration.config,
         status: integration.status,
-        connected: !!integration.thirdPartyOauthId,
+        connected: !!integration.connectionId,
+        connectionId: integration.connectionId,
         apiKeyHint: integration.apiKeyHint,
         waitingCount: await this.integrationService.countWaiting(integration.id)
       }))

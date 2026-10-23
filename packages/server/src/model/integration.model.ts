@@ -23,9 +23,13 @@ export class IntegrationModel extends Document {
   @Prop({ type: Map, default: {} })
   config?: Record<string, any>
 
-  // Connected OAuth2 account, for apps with `auth.type === 'oauth2'`
   @Prop()
   thirdPartyOauthId?: string
+
+  // The team's connected account this integration delivers with, for apps
+  // with `auth.type === 'oauth2'` (IntegrationConnectionModel)
+  @Prop()
+  connectionId?: string
 
   // Encrypted with encryptSecret(), for apps with `auth.type === 'apiKey'`.
   // Never returned to the client; apiKeyHint is shown instead.
@@ -46,3 +50,4 @@ export class IntegrationModel extends Document {
 export const IntegrationSchema = SchemaFactory.createForClass(IntegrationModel)
 
 IntegrationSchema.index({ formId: 1, appId: 1 }, { unique: true })
+IntegrationSchema.index({ connectionId: 1 }, { sparse: true })

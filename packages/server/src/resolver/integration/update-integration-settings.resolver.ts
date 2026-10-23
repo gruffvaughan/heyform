@@ -1,10 +1,15 @@
 import { BadRequestException } from '@nestjs/common'
 
 import { validateAppConfig } from '../../apps/validate-config'
-import { Auth, FormGuard } from '@decorator'
+import { Auth, Form, FormGuard } from '@decorator'
 import { UpdateIntegrationInput } from '@graphql'
 import { helper } from '@heyform-inc/utils'
-import { IntegrationModel, IntegrationStatusEnum } from '@model'
+import {
+  FormModel,
+  IntegrationConnectionStatusEnum,
+  IntegrationModel,
+  IntegrationStatusEnum
+} from '@model'
 import { Args, Mutation, Resolver } from '@nestjs/graphql'
 import { AppService, IntegrationAuthService, IntegrationService } from '@service'
 
@@ -21,7 +26,8 @@ export class UpdateIntegrationSettingsResolver {
   @FormGuard()
   async updateIntegrationSettings(
     @Args('input')
-    input: UpdateIntegrationInput
+    input: UpdateIntegrationInput,
+    @Form() form?: FormModel
   ): Promise<boolean> {
     const app = this.appService.findById(input.appId)
 
@@ -58,13 +64,18 @@ export class UpdateIntegrationSettingsResolver {
     }
 
     if (app.auth.type === 'oauth2') {
-      if (!integration?.thirdPartyOauthId) {
-        const provider = this.appService.findOAuth2Provider(app)
-        throw new BadRequestException(`Connect your ${provider?.name ?? app.name} account first`)
-      }
+      // Any of the team's accounts, whoever connected it
+      const connection = await this.integrationAuthService.findUsableConnection(
+        app,
+        form?.teamId ?? '',
+        input.connectionId || integration?.connectionId
+      )
 
-      // Saving settings doesn't fix a revoked grant; only reconnecting does
-      if (integration.status === IntegrationStatusEnum.NEEDS_RECONNECT) {
+      updates.connectionId = connection.id
+
+      // Saving settings doesn't fix a revoked grant; only reconnecting the
+      // account, or picking another one, does
+      if (connection.status === IntegrationConnectionStatusEnum.NEEDS_RECONNECT) {
         updates.status = IntegrationStatusEnum.NEEDS_RECONNECT
       }
     }

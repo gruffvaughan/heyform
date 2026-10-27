@@ -69,8 +69,13 @@ function pairTakenBy(env, db) {
     )
     process.exit(1)
   }
-  const project = projects.find(p => p.slug === env.ENGINEROOM_PROJECT)
-  return (project?.worktrees ?? []).find(
+  const slug = need(env, 'ENGINEROOM_PROJECT')
+  const project = projects.find(p => p.slug === slug)
+  if (!project) {
+    console.error(`engineroom-env: \`engineroom list\` has no project ${slug}`)
+    process.exit(1)
+  }
+  return (project.worktrees ?? []).find(
     w =>
       w.path !== env.ENGINEROOM_CHECKOUT &&
       w.services.some(s => s.name === 'server' && s.state === 'running' && redisDb(s.port) === db)

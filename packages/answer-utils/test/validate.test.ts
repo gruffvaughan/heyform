@@ -353,9 +353,12 @@ test('file upload accepts a chosen file that submit has not uploaded yet', () =>
     }
   ])
   const file = new File(['cv'], 'cv.pdf', { type: 'application/pdf' })
+  // Stands in for a File from another window, which fails instanceof but keeps its tag.
+  const otherWindowFile = { [Symbol.toStringTag]: 'File', name: 'cv.pdf', size: 2 }
 
   expect(validate(optionalRule, file)).toBe(undefined)
   expect(validate(requiredRule, file)).toBe(undefined)
+  expect(validate(optionalRule, otherWindowFile)).toBe(undefined)
   // A submitted answer shaped like a file still needs an upload URL.
   expect(() =>
     validate(optionalRule, { name: 'cv.pdf', size: 2, type: 'application/pdf' })

@@ -337,6 +337,31 @@ test('file upload requires a usable http(s) upload reference', () => {
   ).toBe(undefined)
 })
 
+test('file upload accepts a chosen file that submit has not uploaded yet', () => {
+  const [optionalRule, requiredRule] = fieldsToValidateRules([
+    {
+      id: 'OPTIONAL_FILE_UPLOAD',
+      kind: FieldKindEnum.FILE_UPLOAD,
+      title: 'CV',
+      validations: { required: false }
+    },
+    {
+      id: 'REQUIRED_FILE_UPLOAD',
+      kind: FieldKindEnum.FILE_UPLOAD,
+      title: 'CV',
+      validations: { required: true }
+    }
+  ])
+  const file = new File(['cv'], 'cv.pdf', { type: 'application/pdf' })
+
+  expect(validate(optionalRule, file as any)).toBe(undefined)
+  expect(validate(requiredRule, file as any)).toBe(undefined)
+  // A JSON answer can't be a File, so one shaped like a file still needs an upload URL.
+  expect(() =>
+    validate(optionalRule, { name: 'cv.pdf', size: 2, type: 'application/pdf' })
+  ).toThrowError()
+})
+
 test('legal terms rejects non-boolean and requires acceptance', () => {
   const requiredRule = fieldsToValidateRules([
     {

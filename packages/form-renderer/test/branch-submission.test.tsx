@@ -319,3 +319,25 @@ test.each(['Producer', ''])(
     )
   }
 )
+
+test('a chosen file on an optional upload question does not send submit back to it', async () => {
+  const cv: FormField = {
+    id: 'cv',
+    kind: FieldKindEnum.FILE_UPLOAD,
+    title: 'cv',
+    validations: { required: false }
+  }
+  // The renderer holds the File itself; it is uploaded only after the route validates.
+  const file = new File(['cv'], 'cv.pdf', { type: 'application/pdf' }) as unknown as AnswerValue
+  const onSubmit = await mount([cv, question('last'), ending('end')], [], { cv: file })
+
+  await submit()
+  expect(currentQuestion()).toBe('last')
+
+  await answer('done')
+  await submit()
+
+  expect(onSubmit).toHaveBeenCalledOnce()
+  expect(onSubmit).toHaveBeenCalledWith({ cv: file, last: 'done' }, false, undefined)
+  expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('end')
+})

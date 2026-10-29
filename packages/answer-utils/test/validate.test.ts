@@ -354,9 +354,9 @@ test('file upload accepts a chosen file that submit has not uploaded yet', () =>
   ])
   const file = new File(['cv'], 'cv.pdf', { type: 'application/pdf' })
 
-  expect(validate(optionalRule, file as any)).toBe(undefined)
-  expect(validate(requiredRule, file as any)).toBe(undefined)
-  // A JSON answer can't be a File, so one shaped like a file still needs an upload URL.
+  expect(validate(optionalRule, file)).toBe(undefined)
+  expect(validate(requiredRule, file)).toBe(undefined)
+  // A submitted answer shaped like a file still needs an upload URL.
   expect(() =>
     validate(optionalRule, { name: 'cv.pdf', size: 2, type: 'application/pdf' })
   ).toThrowError()

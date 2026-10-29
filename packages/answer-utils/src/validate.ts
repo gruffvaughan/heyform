@@ -409,7 +409,7 @@ function validateDateRange(rule: FieldsToValidateRules, value: AnswerValue) {
 function validateFile(rule: FieldsToValidateRules, value: AnswerValue) {
   // The renderer holds a chosen file until submit uploads it. Answers that arrive as
   // JSON can't be a File, so the server still requires an upload URL. Checked by tag,
-  // like the renderer's isFile, so a File from another window passes too.
+  // as the renderer's isFile does, so the two agree on what a chosen file is.
   if (type(value) === 'file') {
     return
   }

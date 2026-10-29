@@ -319,3 +319,42 @@ test.each(['Producer', ''])(
     )
   }
 )
+
+test.each([
+  ['optional', false, false],
+  ['required', true, false],
+  ['optional, on a branch', false, true]
+])(
+  'a chosen file on an %s upload question does not send submit back to it',
+  async (_, required, branched) => {
+    const cv: FormField = {
+      id: 'cv',
+      kind: FieldKindEnum.FILE_UPLOAD,
+      title: 'cv',
+      validations: { required }
+    }
+    // The renderer holds the File itself; it is uploaded only after the route validates.
+    const file = new File(['cv'], 'cv.pdf', { type: 'application/pdf' })
+    const fields = branched
+      ? [question('role', true), question('other-role'), cv, question('last'), ending('end')]
+      : [cv, question('last'), ending('end')]
+    const values = branched ? { role: 'producer', cv: file } : { cv: file }
+    const onSubmit = await mount(
+      fields,
+      branched ? [navigate('role', 'cv', 'producer')] : [],
+      values
+    )
+
+    // Move to the last question with the earlier answers in place.
+    await submit()
+    if (branched) await submit()
+    expect(currentQuestion()).toBe('last')
+
+    await answer('done')
+    await submit()
+
+    expect(onSubmit).toHaveBeenCalledOnce()
+    expect(onSubmit).toHaveBeenCalledWith({ ...values, last: 'done' }, false, undefined)
+    expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('end')
+  }
+)

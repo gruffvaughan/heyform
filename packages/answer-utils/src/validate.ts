@@ -1,7 +1,7 @@
 import { AnswerValue, FieldKindEnum, FormField } from '@heyform-inc/shared-types-enums'
 import dayjs from 'dayjs'
 
-import { helper } from '@heyform-inc/utils'
+import { helper, type } from '@heyform-inc/utils'
 
 import { FieldsToValidateRules, fieldsToValidateRules } from './fields-to-validate-rules'
 import { isDate, isMobilePhone } from './helper'
@@ -407,6 +407,13 @@ function validateDateRange(rule: FieldsToValidateRules, value: AnswerValue) {
 }
 
 function validateFile(rule: FieldsToValidateRules, value: AnswerValue) {
+  // The renderer holds a chosen file until submit uploads it. Answers that arrive as
+  // JSON can't be a File, so the server still requires an upload URL. Checked by tag,
+  // as the renderer's isFile does, so the two agree on what a chosen file is.
+  if (type(value) === 'file') {
+    return
+  }
+
   let url: unknown = value
 
   if (helper.isObject(value)) {

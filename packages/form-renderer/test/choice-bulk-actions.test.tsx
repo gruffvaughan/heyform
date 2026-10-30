@@ -137,6 +137,26 @@ test('"Other" keeps its text on select all and clears on unselect all', async ()
   expect(container.querySelector('.heyform-radio-other input')).toBeNull()
 })
 
+test('editing "Other" after select all keeps the selection', async () => {
+  const onChange = await mount({ allowOther: true, isOtherFilled: true }, 6, {
+    value: [],
+    other: 'Editor'
+  })
+
+  await click(action('Select all')!)
+
+  const input = container.querySelector<HTMLInputElement>('.heyform-radio-other input')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+      input,
+      'Colorist'
+    )
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+
+  expect(onChange).toHaveBeenLastCalledWith({ value: allValues, other: 'Colorist' })
+})
+
 test('a limit removes select all and counts towards the limit', async () => {
   const onChange = await mount({ max: 3 }, 6, { value: ['c0', 'c1'] })
 

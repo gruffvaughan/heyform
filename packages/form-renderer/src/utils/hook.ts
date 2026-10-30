@@ -50,7 +50,7 @@ export function useEnterKey(id: string, callback: (event: KeyboardEvent) => void
 
       if (elem?.classList.contains('heyform-body-active') && event.key === 'Enter') {
         const isIgnoredElement = (event.target as any)?.matches(
-          'input, [contenteditable="true"], [contenteditable="true"] *'
+          'input, .heyform-choice-action, [contenteditable="true"], [contenteditable="true"] *'
         )
         const isDropdownOpen = document.body.classList.contains('heyform-dropdown-open')
 

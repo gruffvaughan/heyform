@@ -459,6 +459,28 @@ button.button-icon-only {
   }
 }
 
+// Bulk actions: quieter than the choices they act on.
+.heyform-choice-actions {
+  @apply mb-2 flex w-full flex-wrap items-center justify-between gap-x-3 text-xs;
+  color: var(--heyform-answer-color);
+}
+
+.heyform-choice-action-list {
+  @apply flex items-center gap-1.5;
+}
+
+button.heyform-choice-action {
+  @apply py-1.5 underline underline-offset-2;
+
+  &:hover {
+    @apply opacity-80;
+  }
+
+  &:disabled {
+    @apply cursor-auto opacity-40;
+  }
+}
+
 // ----------------------------------------------------------------------------
 // CountrySelect
 .heyform-select {
@@ -1094,6 +1116,10 @@ button.button-icon-only {
 .heyform-picture-choice {
   .heyform-radio-group {
     @apply -mx-1 -mb-2 flex flex-wrap items-stretch;
+  }
+
+  .heyform-choice-actions {
+    @apply px-1;
   }
 
   .heyform-radio {

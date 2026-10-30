@@ -134,6 +134,7 @@ export interface IState {
   settings?: FormSettings
   percentage: number
   questionCount: number
+  passedFieldIds: string[]
   scrollIndex?: number
   scrollTo?: ScrollDestination
   isScrollNextDisabled?: boolean
@@ -182,7 +183,7 @@ const actions: any = {
       newValues
     )
 
-    const { questionCount, percentage } = calculateProgress(fields, newValues)
+    const { questionCount, percentage } = calculateProgress(fields, newValues, state.passedFieldIds)
 
     const isTouched = validateLogicField(fields[state.scrollIndex!], state.jumpFieldIds, values)
     const isScrollNextDisabled = !isTouched || state.scrollIndex! >= fields.length - 1
@@ -283,9 +284,17 @@ const actions: any = {
       variables
     )
 
+    // Empty when moving backwards, and spans every question a question list jump skips over.
+    const passedFields = fields.slice(state.scrollIndex, scrollIndex)
+    const passedFieldIds = [...new Set([...state.passedFieldIds, ...passedFields.map(f => f.id)])]
+    const { questionCount, percentage } = calculateProgress(fields, values, passedFieldIds)
+
     return {
       ...state,
       fields,
+      passedFieldIds,
+      percentage,
+      questionCount,
       scrollIndex,
       scrollTo,
       isScrollNextDisabled: false,
@@ -307,6 +316,7 @@ export const StoreContext = createStoreContext<IState>({
   variables: {},
   percentage: 0,
   questionCount: 0,
+  passedFieldIds: [],
   locale: 'en',
   theme: {}
 })

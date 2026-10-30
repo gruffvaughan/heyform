@@ -88,6 +88,7 @@ function initStore(
     values,
     percentage,
     questionCount,
+    passedFieldIds: [],
     formId: form.id,
     scrollIndex: 0,
     scrollTo: 'next',

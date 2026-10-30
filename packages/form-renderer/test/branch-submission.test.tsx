@@ -79,6 +79,7 @@ async function mount(
     theme: {},
     questionCount: 0,
     percentage: 0,
+    passedFieldIds: [],
     onSubmit
   }
 
@@ -121,6 +122,21 @@ async function mount(
             <button type="button" onClick={() => dispatch({ type: 'scrollPrevious' })}>
               Back
             </button>
+            <button type="button" data-next onClick={() => dispatch({ type: 'scrollNext' })}>
+              Next
+            </button>
+            <button
+              type="button"
+              data-last
+              onClick={() =>
+                dispatch({
+                  type: 'scrollToField',
+                  payload: { fieldId: state.fields[state.fields.length - 1].id }
+                })
+              }
+            >
+              Last
+            </button>
           </>
         )}
       </StoreContext.Provider>
@@ -150,6 +166,12 @@ async function submit() {
 async function back() {
   await act(async () => {
     container.querySelector<HTMLButtonElement>('button[type="button"]')!.click()
+  })
+}
+
+async function next() {
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[data-next]')!.click()
   })
 }
 
@@ -403,16 +425,82 @@ test('progress drops answers left behind on a branch the respondent backed out o
   expect(currentPercentage()).toBe('33')
 })
 
-test('progress does not count a cleared answer', async () => {
-  await mount([question('q1'), question('q2'), question('q3'), ending('end')], [], {
+test('progress does not count a blank answer on a required question', async () => {
+  await mount([question('q1'), question('q2', true), question('q3'), ending('end')], [], {
     q1: 'first',
-    q2: 'second'
+    q2: ''
   })
 
-  await answer('')
   await submit()
 
   expect(currentQuestion()).toBe('q2')
+  expect(currentPercentage()).toBe('33')
+})
+
+test('progress counts an optional question the respondent moved past', async () => {
+  await mount([question('q1'), question('q2'), question('q3'), question('q4'), ending('end')], [])
+  expect(currentPercentage()).toBe('0')
+
+  await next()
+  expect(currentQuestion()).toBe('q2')
+  expect(currentPercentage()).toBe('25')
+
+  await next()
+  expect(currentQuestion()).toBe('q3')
+  expect(currentPercentage()).toBe('50')
+
+  // Going back to look at a question does not undo moving past it.
+  await back()
+  expect(currentQuestion()).toBe('q2')
+  expect(currentPercentage()).toBe('50')
+})
+
+test('progress counts every optional question a jump moves past', async () => {
+  await mount([question('q1'), question('q2'), question('q3'), question('q4'), ending('end')], [])
+
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[data-last]')!.click()
+  })
+
+  expect(currentQuestion()).toBe('q4')
+  expect(currentPercentage()).toBe('75')
+})
+
+test('progress does not count a required question the respondent moved past', async () => {
+  await mount([question('q1', true), question('q2'), ending('end')], [])
+
+  await next()
+
+  expect(currentQuestion()).toBe('q2')
+  expect(currentPercentage()).toBe('0')
+})
+
+test('progress forgets questions skipped on a branch the respondent backed out of', async () => {
+  await mount(
+    [
+      question('q1', false, 'q3'),
+      question('branch-a', false, 'q3'),
+      question('q3'),
+      question('q4'),
+      ending('end')
+    ],
+    [navigate('q1', 'branch-a')]
+  )
+
+  await answer('yes')
+  await submit()
+  expect(currentQuestion()).toBe('branch-a')
+
+  await next()
+  expect(currentQuestion()).toBe('q3')
+  expect(currentPercentage()).toBe('50')
+
+  await back()
+  await back()
+  await answer('no')
+  await submit()
+
+  expect(currentQuestion()).toBe('q3')
   expect(currentPercentage()).toBe('33')
 })
 

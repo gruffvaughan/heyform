@@ -284,10 +284,9 @@ const actions: any = {
       variables
     )
 
-    const passedField = scrollIndex > state.scrollIndex! ? fields[state.scrollIndex!] : undefined
-    const passedFieldIds = passedField
-      ? [...new Set([...state.passedFieldIds, passedField.id])]
-      : state.passedFieldIds
+    // Empty when moving backwards, and spans every question a question list jump skips over.
+    const passedFields = fields.slice(state.scrollIndex, scrollIndex)
+    const passedFieldIds = [...new Set([...state.passedFieldIds, ...passedFields.map(f => f.id)])]
     const { questionCount, percentage } = calculateProgress(fields, values, passedFieldIds)
 
     return {

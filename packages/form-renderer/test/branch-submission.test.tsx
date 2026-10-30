@@ -125,6 +125,18 @@ async function mount(
             <button type="button" data-next onClick={() => dispatch({ type: 'scrollNext' })}>
               Next
             </button>
+            <button
+              type="button"
+              data-last
+              onClick={() =>
+                dispatch({
+                  type: 'scrollToField',
+                  payload: { fieldId: state.fields[state.fields.length - 1].id }
+                })
+              }
+            >
+              Last
+            </button>
           </>
         )}
       </StoreContext.Provider>
@@ -441,6 +453,17 @@ test('progress counts an optional question the respondent moved past', async () 
   await back()
   expect(currentQuestion()).toBe('q2')
   expect(currentPercentage()).toBe('50')
+})
+
+test('progress counts every optional question a jump moves past', async () => {
+  await mount([question('q1'), question('q2'), question('q3'), question('q4'), ending('end')], [])
+
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[data-last]')!.click()
+  })
+
+  expect(currentQuestion()).toBe('q4')
+  expect(currentPercentage()).toBe('75')
 })
 
 test('progress does not count a required question the respondent moved past', async () => {

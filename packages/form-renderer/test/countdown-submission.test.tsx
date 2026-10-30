@@ -64,7 +64,7 @@ const logics: Logic[] = [
   }
 ]
 
-async function expire(fields: FormField[]) {
+async function expire(fields: FormField[], query: Record<string, any> = {}) {
   const onSubmit = vi.fn(async () => {})
   const thankYouFields = fields.filter(field => field.kind === FieldKindEnum.THANK_YOU)
   const initialState: IState = {
@@ -78,7 +78,7 @@ async function expire(fields: FormField[]) {
     values: {},
     ...applyLogicToFields(fields, logics, [], {}),
     scrollIndex: 0,
-    query: {},
+    query,
     locale: 'en',
     theme: {},
     questionCount: 0,
@@ -115,4 +115,13 @@ test('running out of time on any other route still sends what was answered', asy
 
   expect(onSubmit).toHaveBeenCalledWith({}, true)
   expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('none')
+})
+
+test('running out of time on a discarding route keeps the embed open', async () => {
+  const postMessage = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {})
+
+  await expire([question, ending('later', true), ending('saved')], { hideAfterSubmit: true })
+
+  expect(postMessage).not.toHaveBeenCalled()
+  postMessage.mockRestore()
 })

@@ -21,7 +21,7 @@ import { helper, type } from '@heyform-inc/utils'
 import { CHAR_A_KEY_CODE } from '../consts'
 import type { AnyMap, IFormField, IPartialFormField } from '../typings'
 
-export { getNavigateFieldId } from '@heyform-inc/answer-utils'
+export { getNavigateFieldId, sliceFieldsByLogics } from '@heyform-inc/answer-utils'
 
 const MENTION_REGEX = /<span[^>]+data-mention="([^"]+)"([^>]+)?>[^<]+<\/span>/gi
 const HIDDEN_FIELD_REGEX = /<span[^>]+data-hiddenfield="([^"]+)"([^>]+)?>[^<]+<\/span>/gi
@@ -177,16 +177,6 @@ export function flattenFieldsWithGroups(fields: IFormField[]): IFormField[] {
   })
 
   return result
-}
-
-export function sliceFieldsByLogics(fields: IFormField[], jumpFieldIds: string[]): IFormField[] {
-  const index = fields.findIndex(f => jumpFieldIds.includes(f.id) && !f.isTouched)
-
-  if (index > -1) {
-    return fields.slice(0, index + 1)
-  }
-
-  return fields
 }
 
 function getPartialField(field: IFormField): IPartialFormField {

@@ -18,6 +18,7 @@ import {
   S3_PUBLIC_URL
 } from '@environments'
 import { resolveEnding } from '@heyform-inc/answer-utils'
+import { helper } from '@heyform-inc/utils'
 
 import { isAllowedUrlOrigin } from './outbound-url'
 
@@ -160,29 +161,32 @@ export function selectSubmissionFields(
   return fields.slice(0, terminalIndex + 1)
 }
 
-// Whether this route ends on an ending that keeps its responses out of the form.
-// `fields` is the route being submitted, `allFields` every field of the form.
+// Whether these answers lead to an ending that keeps its responses out of the form.
+// Forms without such an ending never evaluate it, so they can't fail or change here.
 export function isSubmissionDiscarded(
-  fields: FormField[],
-  allFields: FormField[],
-  logics: Logic[] | undefined,
-  variables: Variable[] | undefined,
+  form: { logics?: Logic[]; variables?: Variable[]; stripeAccount?: unknown },
+  flattenedFields: FormField[],
   values: Record<string, any>,
-  variableValues: Record<string, any>
+  partialSubmission = false
 ): boolean {
-  const thankYouFields = allFields.filter(field => field.kind === FieldKindEnum.THANK_YOU)
+  const hasDiscardingEnding = flattenedFields.some(
+    field => field.kind === FieldKindEnum.THANK_YOU && field.properties?.discardSubmission === true
+  )
 
-  if (!thankYouFields.some(field => field.properties?.discardSubmission === true)) {
+  if (!hasDiscardingEnding) {
     return false
   }
 
+  // The renderer leaves payment fields off the route when payments aren't set up
+  const reachableFields = helper.isValid(form.stripeAccount)
+    ? flattenedFields
+    : flattenedFields.filter(field => field.kind !== FieldKindEnum.PAYMENT)
   const ending = resolveEnding(
-    fields[fields.length - 1],
-    thankYouFields,
-    logics,
-    variables,
+    reachableFields,
+    form.logics,
+    form.variables,
     values,
-    variableValues
+    partialSubmission
   )
 
   return ending?.properties?.discardSubmission === true

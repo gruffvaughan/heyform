@@ -5,11 +5,13 @@ import {
   FormField,
   Logic,
   NavigateAction,
+  OTHER_FIELD_KINDS,
   Variable
 } from '@heyform-inc/shared-types-enums'
 
-import { helper } from '@heyform-inc/utils'
+import { clone, helper } from '@heyform-inc/utils'
 
+import { applyLogicToFields } from './apply-logic-to-fields'
 import { validateCondition } from './validate-condition'
 
 export function getNavigateFieldId(
@@ -73,19 +75,48 @@ export function getNavigateFieldId(
   }
 }
 
-// The ending a respondent reaches from the last field on their route. The renderer
-// shows it and the server decides from it whether to save, so they must agree.
+export function sliceFieldsByLogics<T extends FormField & { isTouched?: boolean }>(
+  fields: T[],
+  jumpFieldIds: string[]
+): T[] {
+  const index = fields.findIndex(f => jumpFieldIds.includes(f.id) && !f.isTouched)
+
+  if (index > -1) {
+    return fields.slice(0, index + 1)
+  }
+
+  return fields
+}
+
+// The ending these answers lead to. The renderer shows it and the server decides from it
+// whether to save, so both call this with the fields the respondent can reach, in any order.
 export function resolveEnding(
-  lastField: FormField | undefined,
-  thankYouFields: FormField[] = [],
+  fields: FormField[] = [],
   logics?: Logic[] | null,
   variables?: Variable[] | null,
-  fieldValues: Record<string, any> = {},
-  variableValues: Record<string, AnswerValue> = {}
+  values: Record<string, AnswerValue> = {},
+  isPartialSubmission = false
 ): FormField | undefined {
+  const thankYouFields = fields.filter(f => f.kind === FieldKindEnum.THANK_YOU)
+
+  if (helper.isEmpty(thankYouFields)) {
+    return
+  }
+
+  const { fields: route, variables: variableValues } = applyLogicToFields(
+    clone([...fields.filter(f => !OTHER_FIELD_KINDS.includes(f.kind)), ...thankYouFields]),
+    logics ?? undefined,
+    variables ?? undefined,
+    values
+  )
+  const jumpFieldIds = (logics || [])
+    .filter(l => l.payloads.some(p => p.action.kind === ActionEnum.NAVIGATE))
+    .map(l => l.fieldId)
+  const submitted = isPartialSubmission ? sliceFieldsByLogics(route, jumpFieldIds) : route
+  const lastField = submitted[submitted.length - 1]
   const fieldId =
     lastField &&
-    getNavigateFieldId(lastField, thankYouFields, logics, variables, fieldValues, variableValues)
+    getNavigateFieldId(lastField, thankYouFields, logics, variables, values, variableValues)
 
   return thankYouFields.find(f => f.id === fieldId) ?? thankYouFields[0]
 }

@@ -137,12 +137,10 @@ export class CompleteSubmissionResolver {
         value: variableValues[variable.id]
       }))
       isDiscarded = isSubmissionDiscarded(
-        fields,
+        form,
         flattenedFields,
-        form.logics,
-        form.variables,
         input.answers,
-        variableValues
+        input.partialSubmission === true
       )
     } catch (err) {
       throw new BadRequestException(err.response)

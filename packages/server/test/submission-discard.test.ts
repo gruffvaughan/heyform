@@ -173,12 +173,33 @@ async function testPartialSubmissionFallingThroughToDiscardingEnding() {
   assert.strictEqual(calls.create, 0)
 }
 
+// Without Stripe the renderer drops the payment field, so q1 falls through to the first
+// ending and the respondent sees it as saved. The server must not take the payment's route.
+async function testPaymentRouteIsIgnoredWithoutStripe() {
+  const { calls, submit } = setup({
+    ...form,
+    stripeAccount: undefined,
+    fields: [
+      { ...form.fields[0], nextFieldId: 'pay' },
+      { ...form.fields[1], nextFieldId: 'not_eligible' },
+      form.fields[2],
+      form.fields[3]
+    ],
+    logics: []
+  })
+
+  await submit({ q1: 'yes' })
+
+  assert.strictEqual(calls.create, 1)
+}
+
 async function main() {
   await testDiscardingEndingStoresAndSendsNothing()
   await testOtherRoutesAreStillSaved()
   await testInvalidAnswersAreStillRejected()
   await testFormsWithoutLogicOrVariablesAreSaved()
   await testPartialSubmissionFallingThroughToDiscardingEnding()
+  await testPaymentRouteIsIgnoredWithoutStripe()
 }
 
 main().catch(err => {

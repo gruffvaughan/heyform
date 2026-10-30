@@ -173,12 +173,44 @@ async function testPartialSubmissionFallingThroughToDiscardingEnding() {
   assert.strictEqual(calls.create, 0)
 }
 
+// The renderer may hide the payment field, Stripe account or not, so q1 falls through to the
+// first ending and the respondent sees it as saved. Disagreeing routes must keep the response.
+async function testPaymentRouteThatChangesTheEndingIsSaved() {
+  for (const stripeAccount of [undefined, form.stripeAccount]) {
+    const { calls, submit } = setup({
+      ...form,
+      stripeAccount,
+      fields: [
+        { ...form.fields[0], nextFieldId: 'pay' },
+        { ...form.fields[1], nextFieldId: 'not_eligible' },
+        form.fields[2],
+        form.fields[3]
+      ],
+      logics: []
+    })
+
+    await submit({ q1: 'yes' })
+
+    assert.strictEqual(calls.create, 1)
+  }
+}
+
+// Both routes agree here: the jump to the discarding ending comes before the payment field.
+async function testPaymentFieldLaterInTheFormStillDiscards() {
+  const { calls, submit } = setup({ ...form, stripeAccount: undefined })
+
+  assert.deepStrictEqual(await submit({ q1: 'no' }), {})
+  assert.strictEqual(calls.create, 0)
+}
+
 async function main() {
   await testDiscardingEndingStoresAndSendsNothing()
   await testOtherRoutesAreStillSaved()
   await testInvalidAnswersAreStillRejected()
   await testFormsWithoutLogicOrVariablesAreSaved()
   await testPartialSubmissionFallingThroughToDiscardingEnding()
+  await testPaymentRouteThatChangesTheEndingIsSaved()
+  await testPaymentFieldLaterInTheFormStillDiscards()
 }
 
 main().catch(err => {

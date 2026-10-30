@@ -1,3 +1,4 @@
+import { FieldKindEnum } from '@heyform-inc/shared-types-enums'
 import { startTransition, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -8,7 +9,8 @@ import { RequiredSettingsProps } from './Required'
 
 export default function ThankYou({ field }: RequiredSettingsProps) {
   const { t } = useTranslation()
-  const { dispatch } = useStoreContext()
+  const { state, dispatch } = useStoreContext()
+  const isFirstEnding = state.fields.find(f => f.kind === FieldKindEnum.THANK_YOU)?.id === field.id
 
   const handleChange = useCallback(
     (key: string, value: any) => {
@@ -47,6 +49,12 @@ export default function ThankYou({ field }: RequiredSettingsProps) {
         <p className="text-secondary text-xs">
           {t('form.builder.settings.discardSubmissionDescription')}
         </p>
+
+        {field.properties?.discardSubmission && isFirstEnding && (
+          <p className="text-error text-xs">
+            {t('form.builder.settings.discardSubmissionFirstEnding')}
+          </p>
+        )}
       </div>
 
       <div className="space-y-1">

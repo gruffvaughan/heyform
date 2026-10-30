@@ -160,32 +160,32 @@ export function selectSubmissionFields(
   return fields.slice(0, terminalIndex + 1)
 }
 
-// Whether this route ends on an ending that keeps its responses out of the form.
-// `fields` is the route being submitted, `allFields` every field of the form.
+// Whether these answers lead to an ending that keeps its responses out of the form.
+// Forms without such an ending never evaluate it, so they can't fail or change here.
 export function isSubmissionDiscarded(
-  fields: FormField[],
-  allFields: FormField[],
-  logics: Logic[] | undefined,
-  variables: Variable[] | undefined,
+  form: { logics?: Logic[]; variables?: Variable[] },
+  flattenedFields: FormField[],
   values: Record<string, any>,
-  variableValues: Record<string, any>
+  partialSubmission = false
 ): boolean {
-  const thankYouFields = allFields.filter(field => field.kind === FieldKindEnum.THANK_YOU)
+  const hasDiscardingEnding = flattenedFields.some(
+    field => field.kind === FieldKindEnum.THANK_YOU && field.properties?.discardSubmission === true
+  )
 
-  if (!thankYouFields.some(field => field.properties?.discardSubmission === true)) {
+  if (!hasDiscardingEnding) {
     return false
   }
 
-  const ending = resolveEnding(
-    fields[fields.length - 1],
-    thankYouFields,
-    logics,
-    variables,
-    values,
-    variableValues
-  )
+  const endsDiscarding = (fields: FormField[]) =>
+    resolveEnding(fields, form.logics, form.variables, values, partialSubmission)?.properties
+      ?.discardSubmission === true
 
-  return ending?.properties?.discardSubmission === true
+  // The renderer may leave payment fields off the route, and that changes where it ends.
+  // Discard only if the route ends the same way either way, so a mismatch keeps the response.
+  return (
+    endsDiscarding(flattenedFields) &&
+    endsDiscarding(flattenedFields.filter(field => field.kind !== FieldKindEnum.PAYMENT))
+  )
 }
 
 export function assertSafeSpecialFieldAnswers(

@@ -152,29 +152,22 @@ export const Form: FC<FormProps> = ({
           }
         }
 
-        const { variables } = applyLogicToFields(
-          clone([...state.allFields, ...state.thankYouFields].filter(Boolean) as FormField[]),
-          state.logics,
-          state.parameters,
-          values
-        )
-
         const ending = resolveEnding(
-          field,
-          state.thankYouFields,
+          [...state.allFields, ...state.thankYouFields],
           state.logics,
           state.parameters,
           values,
-          variables
+          !!isPartialSubmission
         )
 
-        // Submit form, unless this ending keeps its responses out of the form
+        // An ending that keeps its responses out of the form still has something to tell the
+        // respondent, so it neither submits nor closes the embed
         if (!ending?.properties?.discardSubmission) {
           await state.onSubmit?.(values, isPartialSubmission, state.stripe)
-        }
 
-        if (helper.isTrue(state.query.hideAfterSubmit)) {
-          sendMessageToParent('HIDE_EMBED_MODAL')
+          if (helper.isTrue(state.query.hideAfterSubmit)) {
+            sendMessageToParent('HIDE_EMBED_MODAL')
+          }
         }
 
         setLoading(false)

@@ -58,7 +58,8 @@ function navigate(fieldId: string, targetId: string, expected = 'yes'): Logic {
 async function mount(
   fields: FormField[],
   logics: Logic[],
-  values: Record<string, AnswerValue> = {}
+  values: Record<string, AnswerValue> = {},
+  query: Record<string, any> = {}
 ) {
   const onSubmit = vi.fn(async () => {})
   const thankYouFields = fields.filter(field => field.kind === FieldKindEnum.THANK_YOU)
@@ -74,7 +75,7 @@ async function mount(
     ...applyLogicToFields(fields, logics, [], values),
     scrollIndex: 0,
     isScrollNextDisabled: false,
-    query: {},
+    query,
     locale: 'en',
     theme: {},
     questionCount: 0,
@@ -589,4 +590,40 @@ test('a required question skipped on a discarding route still blocks the ending'
   expect(onSubmit).not.toHaveBeenCalled()
   expect(currentQuestion()).toBe('q1')
   expect(container.querySelector('output')?.getAttribute('data-ending')).toBeNull()
+})
+
+test('a discarding ending keeps the embed open so the respondent can read it', async () => {
+  const postMessage = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {})
+  await mount(
+    [question('q1'), ending('end'), discardingEnding('not-eligible')],
+    [navigate('q1', 'not-eligible', 'no')],
+    {},
+    { hideAfterSubmit: true }
+  )
+
+  await answer('no')
+  await submit()
+
+  expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('not-eligible')
+  expect(postMessage).not.toHaveBeenCalled()
+  postMessage.mockRestore()
+})
+
+test('any other ending still closes the embed after submitting', async () => {
+  const postMessage = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {})
+  await mount(
+    [question('q1'), ending('end'), discardingEnding('not-eligible')],
+    [navigate('q1', 'not-eligible', 'no')],
+    {},
+    { hideAfterSubmit: true }
+  )
+
+  await answer('yes')
+  await submit()
+
+  expect(postMessage).toHaveBeenCalledWith(
+    expect.objectContaining({ eventName: 'HIDE_EMBED_MODAL' }),
+    '*'
+  )
+  postMessage.mockRestore()
 })

@@ -1330,6 +1330,8 @@
         "defaultCountry": "Domyślny kraj",
         "buttonText": "Tekst przycisku",
         "redirect": "Przekierowanie po zakończeniu",
+        "discardSubmission": "Nie zapisuj odpowiedzi",
+        "discardSubmissionDescription": "Odpowiedzi kończące się tutaj nie są zapisywane. Powiadomienia, webhooki i integracje nie są uruchamiane, a odpowiedzi nie wliczają się do limitu.",
         "shape": "Kształt",
         "star": "Gwiazda",
         "heart": "Serce",

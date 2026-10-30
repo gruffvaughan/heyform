@@ -1334,6 +1334,8 @@
         "defaultCountry": "Pays par défaut",
         "buttonText": "Texte du bouton",
         "redirect": "Rediriger à la fin",
+        "discardSubmission": "Ne pas enregistrer les réponses",
+        "discardSubmissionDescription": "Les réponses qui se terminent ici ne sont pas enregistrées. Les notifications, webhooks et intégrations ne sont pas déclenchés, et elles ne comptent pas dans la limite de réponses.",
         "shape": "Forme",
         "star": "Étoile",
         "heart": "Cœur",

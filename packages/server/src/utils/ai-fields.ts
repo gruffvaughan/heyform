@@ -81,6 +81,7 @@ const propertiesSchema = z.preprocess(
       redirectUrl: optionalString,
       redirectOnCompletion: optionalBoolean,
       redirectDelay: optionalNumber,
+      discardSubmission: optionalBoolean,
       choices: identifiedItems(
         identifiedItemSchema.extend({
           image: optionalString,

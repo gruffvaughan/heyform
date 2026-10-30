@@ -5,7 +5,8 @@ import {
   HiddenField,
   HiddenFieldAnswer,
   Logic,
-  Property
+  Property,
+  Variable
 } from '@heyform-inc/shared-types-enums'
 import { BadRequestException } from '@nestjs/common'
 
@@ -16,6 +17,7 @@ import {
   S3_ENDPOINT,
   S3_PUBLIC_URL
 } from '@environments'
+import { resolveEnding } from '@heyform-inc/answer-utils'
 
 import { isAllowedUrlOrigin } from './outbound-url'
 
@@ -156,6 +158,34 @@ export function selectSubmissionFields(
   }
 
   return fields.slice(0, terminalIndex + 1)
+}
+
+// Whether this route ends on an ending that keeps its responses out of the form.
+// `fields` is the route being submitted, `allFields` every field of the form.
+export function isSubmissionDiscarded(
+  fields: FormField[],
+  allFields: FormField[],
+  logics: Logic[] | undefined,
+  variables: Variable[] | undefined,
+  values: Record<string, any>,
+  variableValues: Record<string, any>
+): boolean {
+  const thankYouFields = allFields.filter(field => field.kind === FieldKindEnum.THANK_YOU)
+
+  if (!thankYouFields.some(field => field.properties?.discardSubmission === true)) {
+    return false
+  }
+
+  const ending = resolveEnding(
+    fields[fields.length - 1],
+    thankYouFields,
+    logics,
+    variables,
+    values,
+    variableValues
+  )
+
+  return ending?.properties?.discardSubmission === true
 }
 
 export function assertSafeSpecialFieldAnswers(

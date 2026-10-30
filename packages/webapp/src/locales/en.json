@@ -1473,6 +1473,8 @@
         "defaultCountry": "Default country",
         "buttonText": "Button text",
         "redirect": "Redirect on completion",
+        "discardSubmission": "Don't save responses",
+        "discardSubmissionDescription": "Responses that end here aren't saved. Notifications, webhooks and integrations don't run, and they don't count towards the response limit.",
         "shape": "Shape",
         "star": "Star",
         "heart": "Heart",

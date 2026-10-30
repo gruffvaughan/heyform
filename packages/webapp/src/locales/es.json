@@ -1388,6 +1388,8 @@
         "defaultCountry": "País predeterminado",
         "buttonText": "Texto del botón",
         "redirect": "Redirigir al finalizar",
+        "discardSubmission": "No guardar las respuestas",
+        "discardSubmissionDescription": "Las respuestas que terminan aquí no se guardan. No se ejecutan notificaciones, webhooks ni integraciones, y no cuentan para el límite de respuestas.",
         "shape": "Forma",
         "star": "Estrella",
         "heart": "Corazón",

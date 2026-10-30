@@ -531,3 +531,62 @@ test('progress reaches 100% on a route through a group, which is not itself a qu
   expect(currentQuestion()).toBe('c2')
   expect(currentPercentage()).toBe('100')
 })
+
+function discardingEnding(id: string): FormField {
+  return { ...ending(id), properties: { discardSubmission: true } }
+}
+
+test('a route that ends on a discarding ending shows it without submitting', async () => {
+  const onSubmit = await mount(
+    [question('q1'), ending('end'), discardingEnding('not-eligible')],
+    [navigate('q1', 'not-eligible', 'no')]
+  )
+
+  await answer('no')
+  await submit()
+
+  expect(onSubmit).not.toHaveBeenCalled()
+  expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('not-eligible')
+})
+
+test('a form with a discarding ending still submits routes that end elsewhere', async () => {
+  const onSubmit = await mount(
+    [question('q1'), ending('end'), discardingEnding('not-eligible')],
+    [navigate('q1', 'not-eligible', 'no')]
+  )
+
+  await answer('yes')
+  await submit()
+
+  expect(onSubmit).toHaveBeenCalledWith({ q1: 'yes' }, false, undefined)
+  expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('end')
+})
+
+test('a discarding first ending catches routes that fall through to it', async () => {
+  const onSubmit = await mount(
+    [question('q1'), discardingEnding('not-eligible'), ending('end')],
+    [navigate('q1', 'end', 'yes')]
+  )
+
+  await answer('no')
+  await submit()
+
+  expect(onSubmit).not.toHaveBeenCalled()
+  expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('not-eligible')
+})
+
+test('a required question skipped on a discarding route still blocks the ending', async () => {
+  const onSubmit = await mount(
+    [question('q1', true), question('q2'), discardingEnding('not-eligible')],
+    []
+  )
+
+  await next()
+  expect(currentQuestion()).toBe('q2')
+
+  await submit()
+
+  expect(onSubmit).not.toHaveBeenCalled()
+  expect(currentQuestion()).toBe('q1')
+  expect(container.querySelector('output')?.getAttribute('data-ending')).toBeNull()
+})

@@ -224,18 +224,25 @@ export function validateLogicField(
   return true
 }
 
-// Answers stay in the values when a respondent backs out of a branch, so count
-// them along the current route rather than counting the values themselves.
-export function calculateProgress(fields: IFormField[], values: AnyMap) {
+// Answers and skips outlive a branch the respondent backed out of, so count them
+// along the current route. Moving past a required question doesn't complete it,
+// since submitting sends the respondent back to answer it.
+export function calculateProgress(
+  fields: IFormField[],
+  values: AnyMap,
+  passedFieldIds: string[] = []
+) {
   // A group only presents its children, so it never holds an answer of its own.
   const questions = fields.filter(
     f => f.kind !== FieldKindEnum.GROUP && QUESTION_FIELD_KINDS.includes(f.kind)
   )
-  const answerCount = questions.filter(f => helper.isValid(values[f.id])).length
+  const doneCount = questions.filter(
+    f => helper.isValid(values[f.id]) || (!f.validations?.required && passedFieldIds.includes(f.id))
+  ).length
 
   return {
     questionCount: questions.length,
-    percentage: questions.length === 0 ? 0 : Math.round((answerCount / questions.length) * 100)
+    percentage: questions.length === 0 ? 0 : Math.round((doneCount / questions.length) * 100)
   }
 }
 

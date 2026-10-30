@@ -15,11 +15,12 @@
     "dev:engineroom": "pnpm build:shared && run-p dev:engineroom:webapp dev:engineroom:server",
     "dev:engineroom:webapp": "engineroom run web -- sh -c 'cd packages/webapp && exec node engineroom-dev.mjs'",
     "dev:engineroom:server": "engineroom run server -- sh -c 'vars=$(node scripts/engineroom-env.mjs) && eval \"$vars\" && exec pnpm --filter ./packages/server dev'",
+    "dev:database": "docker compose -f docker-compose.development.yml up",
     "build:server": "pnpm build:shared && pnpm --filter ./packages/server build",
     "build:webapp": "pnpm build:shared && pnpm --filter ./packages/webapp build",
     "format": "prettier --write \"packages/**/*.{js,ts,tsx,css}\"",
     "lint": "node scripts/run-oxlint.js packages",
-    "postinstall": "node scripts/build-shared.js && simple-git-hooks",
+    "postinstall": "simple-git-hooks",
     "build:shared": "pnpm --filter ./packages/utils build && pnpm --filter ./packages/shared-types-enums build && pnpm --filter ./packages/answer-utils build"
   },
   "simple-git-hooks": {

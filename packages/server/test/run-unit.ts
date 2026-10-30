@@ -4,6 +4,7 @@ import * as path from 'path'
 const tests = [
   'form-branding.test.ts',
   'templates.test.ts',
+  'changelog.test.ts',
   'password-login.test.ts',
   'ai-json.test.ts',
   'ai-fields.test.ts',
@@ -16,6 +17,7 @@ const tests = [
   'oidc-security.test.ts',
   'oidc-provisioning.test.ts',
   'notification-recipients.test.ts',
+  'notification-options.test.ts',
   'export-file.service.test.ts',
   'form-report.service.test.ts',
   'webhook.test.ts',
@@ -26,7 +28,9 @@ const tests = [
   'integration-auth.test.ts',
   'integration-records.test.ts',
   'integration-secrets.test.ts',
-  'googlesheets.test.ts'
+  'googlesheets.test.ts',
+  'page-apps.test.ts',
+  'form-analytic-cache.test.ts'
 ]
 const serverRoot = path.resolve(__dirname, '..')
 

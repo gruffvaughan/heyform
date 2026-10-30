@@ -6,6 +6,7 @@ import {
   FormField,
   Logic,
   NavigateAction,
+  QUESTION_FIELD_KINDS,
   Variable
 } from '@heyform-inc/shared-types-enums'
 
@@ -223,11 +224,19 @@ export function validateLogicField(
   return true
 }
 
-export function progressPercentage(valueLength: number, questionCount: number) {
-  if (questionCount === 0) {
-    return 0
+// Answers stay in the values when a respondent backs out of a branch, so count
+// them along the current route rather than counting the values themselves.
+export function calculateProgress(fields: IFormField[], values: AnyMap) {
+  // A group only presents its children, so it never holds an answer of its own.
+  const questions = fields.filter(
+    f => f.kind !== FieldKindEnum.GROUP && QUESTION_FIELD_KINDS.includes(f.kind)
+  )
+  const answerCount = questions.filter(f => validateRequiredField(f, values)).length
+
+  return {
+    questionCount: questions.length,
+    percentage: questions.length === 0 ? 0 : Math.round((answerCount / questions.length) * 100)
   }
-  return Math.round((valueLength / questionCount) * 100)
 }
 
 export function numberToChar(number: number, radix = 26): string {

@@ -103,7 +103,7 @@ export function resolveEnding(
     return
   }
 
-  const { fields: route, variables: routeVariables } = applyLogicToFields(
+  const { fields: route } = applyLogicToFields(
     clone([...fields.filter(f => !OTHER_FIELD_KINDS.includes(f.kind)), ...thankYouFields]),
     logics ?? undefined,
     variables ?? undefined,
@@ -113,15 +113,27 @@ export function resolveEnding(
     .filter(l => l.payloads.some(p => p.action.kind === ActionEnum.NAVIGATE))
     .map(l => l.fieldId)
   const submitted = isPartialSubmission ? sliceFieldsByLogics(route, jumpFieldIds) : route
-  // Answers kept from further along a route the respondent backed out of must not count
-  const variableValues =
-    submitted.length < route.length
-      ? applyLogicToFields(submitted, logics ?? undefined, variables ?? undefined, values).variables
-      : routeVariables
+  // Answers kept from a route the respondent backed out of must not choose the ending
+  const submittedValues = Object.fromEntries(
+    submitted.filter(f => f.id in values).map(f => [f.id, values[f.id]])
+  )
+  const { variables: variableValues } = applyLogicToFields(
+    submitted,
+    logics ?? undefined,
+    variables ?? undefined,
+    submittedValues
+  )
   const lastField = submitted[submitted.length - 1]
   const fieldId =
     lastField &&
-    getNavigateFieldId(lastField, thankYouFields, logics, variables, values, variableValues)
+    getNavigateFieldId(
+      lastField,
+      thankYouFields,
+      logics,
+      variables,
+      submittedValues,
+      variableValues
+    )
 
   return thankYouFields.find(f => f.id === fieldId) ?? thankYouFields[0]
 }

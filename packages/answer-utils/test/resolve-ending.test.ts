@@ -204,6 +204,47 @@ test('a calculation cannot read an answer from outside the submitted route', () 
   )
 })
 
+test('an unanswered question resolves the same before and after JSON', () => {
+  const optional: FormField = { id: 'q', kind: FieldKindEnum.NUMBER }
+  const variables = [
+    {
+      id: 'score',
+      kind: 'number',
+      value: 0,
+      logics: [
+        {
+          condition: { comparison: ComparisonEnum.GREATER_THAN, expected: 5 },
+          action: { kind: ActionEnum.NAVIGATE, fieldId: 'second' }
+        }
+      ]
+    }
+  ] as unknown as Variable[]
+  const addUnlessOne: Logic[] = [
+    {
+      fieldId: 'q',
+      payloads: [
+        {
+          id: 'p1',
+          condition: { comparison: ComparisonEnum.NOT_EQUAL, expected: 1 },
+          action: {
+            kind: ActionEnum.CALCULATE,
+            variable: 'score',
+            operator: 'addition',
+            value: 10
+          } as any
+        }
+      ]
+    }
+  ]
+  const form = [optional, first, second]
+  const inBrowser = { q: undefined } as any
+  const onServer = JSON.parse(JSON.stringify(inBrowser))
+
+  expect(onServer).toEqual({})
+  expect(resolveEnding(form, addUnlessOne, variables, inBrowser)?.id).toBe('second')
+  expect(resolveEnding(form, addUnlessOne, variables, onServer)?.id).toBe('second')
+})
+
 test('resolving an ending leaves the fields untouched', () => {
   const stored = [{ ...question }, { ...first }, { ...second }]
 

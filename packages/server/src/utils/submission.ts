@@ -176,6 +176,13 @@ export function isSubmissionDiscarded(
     return false
   }
 
+  // Variable rules can read answers the browser changes before sending, such as an upload's
+  // URL, so the server could reach another ending than the one on screen. Current renderers
+  // never send a discarded response, so leave these forms to them: at worst this keeps one.
+  if (form.variables?.some(variable => variable.logics?.length)) {
+    return false
+  }
+
   const endsDiscarding = (fields: FormField[]) =>
     resolveEnding(fields, form.logics, form.variables, values, partialSubmission)?.properties
       ?.discardSubmission === true

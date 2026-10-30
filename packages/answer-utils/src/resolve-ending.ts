@@ -103,20 +103,39 @@ export function resolveEnding(
     return
   }
 
-  const { fields: route, variables: variableValues } = applyLogicToFields(
-    clone([...fields.filter(f => !OTHER_FIELD_KINDS.includes(f.kind)), ...thankYouFields]),
+  const questions = fields.filter(f => !OTHER_FIELD_KINDS.includes(f.kind))
+  // The browser holds an unanswered question as undefined and JSON drops it on the way to the
+  // server. List every question on both sides, so the two see the same answers.
+  const answers = Object.fromEntries(questions.map(f => [f.id, values[f.id]]))
+  const { fields: route } = applyLogicToFields(
+    clone([...questions, ...thankYouFields]),
     logics ?? undefined,
     variables ?? undefined,
-    values
+    answers
   )
   const jumpFieldIds = (logics || [])
     .filter(l => l.payloads.some(p => p.action.kind === ActionEnum.NAVIGATE))
     .map(l => l.fieldId)
   const submitted = isPartialSubmission ? sliceFieldsByLogics(route, jumpFieldIds) : route
+  // Answers kept from a route the respondent backed out of must not choose the ending
+  const submittedValues = Object.fromEntries(submitted.map(f => [f.id, answers[f.id]]))
+  const { variables: variableValues } = applyLogicToFields(
+    submitted,
+    logics ?? undefined,
+    variables ?? undefined,
+    submittedValues
+  )
   const lastField = submitted[submitted.length - 1]
   const fieldId =
     lastField &&
-    getNavigateFieldId(lastField, thankYouFields, logics, variables, values, variableValues)
+    getNavigateFieldId(
+      lastField,
+      thankYouFields,
+      logics,
+      variables,
+      submittedValues,
+      variableValues
+    )
 
   return thankYouFields.find(f => f.id === fieldId) ?? thankYouFields[0]
 }

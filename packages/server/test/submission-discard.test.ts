@@ -203,6 +203,31 @@ async function testPaymentFieldLaterInTheFormStillDiscards() {
   assert.strictEqual(calls.create, 0)
 }
 
+// The browser swaps an upload for its URL before sending, so a rule reading it can resolve
+// differently here than on screen. The server must keep the response rather than guess.
+async function testFormsWithVariableRulesAreLeftToTheRenderer() {
+  const { calls, submit } = setup({
+    ...form,
+    variables: [
+      {
+        id: 'v',
+        kind: 'string',
+        value: '',
+        logics: [
+          {
+            condition: { comparison: ComparisonEnum.STARTS_WITH, expected: 'http' },
+            action: { kind: ActionEnum.NAVIGATE, fieldId: 'not_eligible' }
+          }
+        ]
+      }
+    ]
+  })
+
+  await submit({ q1: 'no' })
+
+  assert.strictEqual(calls.create, 1)
+}
+
 async function main() {
   await testDiscardingEndingStoresAndSendsNothing()
   await testOtherRoutesAreStillSaved()
@@ -211,6 +236,7 @@ async function main() {
   await testPartialSubmissionFallingThroughToDiscardingEnding()
   await testPaymentRouteThatChangesTheEndingIsSaved()
   await testPaymentFieldLaterInTheFormStillDiscards()
+  await testFormsWithVariableRulesAreLeftToTheRenderer()
 }
 
 main().catch(err => {

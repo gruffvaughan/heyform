@@ -157,6 +157,10 @@ function currentQuestion() {
   return container.querySelector('output')?.getAttribute('data-question')
 }
 
+function currentPercentage() {
+  return container.querySelector('output')?.getAttribute('data-percentage')
+}
+
 test.each([false, true])(
   'a submitted answer opens the optional/required branch (required=%s)',
   async required => {
@@ -350,6 +354,8 @@ test.each([
     if (branched) await submit()
     expect(currentQuestion()).toBe('last')
 
+    expect(currentPercentage()).toBe(branched ? '67' : '50')
+
     await answer('done')
     await submit()
 
@@ -358,3 +364,82 @@ test.each([
     expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('end')
   }
 )
+
+test('progress counts only the questions on the route the answers chose', async () => {
+  await mount(
+    [question('q1'), question('skipped'), question('q3'), question('q4'), ending('end')],
+    [navigate('q1', 'q3')]
+  )
+
+  await answer('yes')
+  await submit()
+  expect(currentQuestion()).toBe('q3')
+  expect(currentPercentage()).toBe('33')
+
+  await answer('done')
+  await submit()
+  expect(currentQuestion()).toBe('q4')
+  expect(currentPercentage()).toBe('67')
+})
+
+test('progress drops answers left behind on a branch the respondent backed out of', async () => {
+  await mount(
+    [
+      question('q1', false, 'q3'),
+      question('branch-a'),
+      question('branch-b', false, 'q3'),
+      question('q3'),
+      question('q4'),
+      ending('end')
+    ],
+    [navigate('q1', 'branch-a')],
+    { q1: 'yes', 'branch-a': 'a', 'branch-b': 'b' }
+  )
+
+  await answer('no')
+  await submit()
+
+  expect(currentQuestion()).toBe('q3')
+  expect(currentPercentage()).toBe('33')
+})
+
+test('progress does not count a cleared answer', async () => {
+  await mount([question('q1'), question('q2'), question('q3'), ending('end')], [], {
+    q1: 'first',
+    q2: 'second'
+  })
+
+  await answer('')
+  await submit()
+
+  expect(currentQuestion()).toBe('q2')
+  expect(currentPercentage()).toBe('33')
+})
+
+test('progress counts declining optional legal terms as an answer', async () => {
+  const terms: FormField = { id: 'terms', kind: FieldKindEnum.LEGAL_TERMS, title: 'terms' }
+
+  await mount([terms, question('q2'), ending('end')], [], { terms: false })
+
+  await submit()
+
+  expect(currentQuestion()).toBe('q2')
+  expect(currentPercentage()).toBe('50')
+})
+
+test('progress reaches 100% on a route through a group, which is not itself a question', async () => {
+  const group: FormField = { id: 'group', kind: FieldKindEnum.GROUP, title: 'group' }
+  const child = (id: string): FormField => ({ ...question(id), parent: group })
+
+  await mount([group, child('c1'), child('c2'), question('q3'), ending('end')], [], {
+    c1: 'a',
+    c2: 'b',
+    q3: 'c'
+  })
+
+  await submit()
+  await submit()
+
+  expect(currentQuestion()).toBe('c2')
+  expect(currentPercentage()).toBe('100')
+})

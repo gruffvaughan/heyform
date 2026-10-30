@@ -6,16 +6,15 @@ import type {
   Logic,
   Variable
 } from '@heyform-inc/shared-types-enums'
-import { QUESTION_FIELD_KINDS } from '@heyform-inc/shared-types-enums'
 import { useContext } from 'react'
 
 import {
   LRU,
   LRUMemoryStore,
+  calculateProgress,
   createStoreContext,
   createStoreReducer,
   isFile,
-  progressPercentage,
   replaceHTML,
   validateLogicField
 } from './utils'
@@ -183,8 +182,7 @@ const actions: any = {
       newValues
     )
 
-    const questionCount = fields.filter(f => QUESTION_FIELD_KINDS.includes(f.kind)).length
-    const percentage = progressPercentage(Object.keys(newValues).length, questionCount)
+    const { questionCount, percentage } = calculateProgress(fields, newValues)
 
     const isTouched = validateLogicField(fields[state.scrollIndex!], state.jumpFieldIds, values)
     const isScrollNextDisabled = !isTouched || state.scrollIndex! >= fields.length - 1

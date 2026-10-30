@@ -67,3 +67,13 @@ test('resizing keeps a focused text input in view above the keyboard', async () 
 
   expect(scrollIntoView).toHaveBeenCalledTimes(1)
 })
+
+// Stripe's card fields live in iframes, so the iframe is what the page sees as focused.
+test('resizing keeps a focused card field in view above the keyboard', async () => {
+  await mount({ id: 'text', kind: FieldKindEnum.SHORT_TEXT, title: 'Text' })
+
+  container.appendChild(document.createElement('iframe'))
+  await resizeWithFocusOn('iframe')
+
+  expect(scrollIntoView).toHaveBeenCalledTimes(1)
+})

@@ -105,6 +105,46 @@ test('a partial submission ends at the first unanswered jump question', () => {
   expect(resolveEnding([question, later, first, second], logics, [], {}, false)?.id).toBe('second')
 })
 
+test('a partial submission ignores calculations past where it stops', () => {
+  const later: FormField = { id: 'q2', kind: FieldKindEnum.SHORT_TEXT }
+  const variables = [
+    {
+      id: 'score',
+      kind: 'number',
+      value: 0,
+      logics: [
+        {
+          condition: { comparison: ComparisonEnum.GREATER_THAN, expected: 5 },
+          action: { kind: ActionEnum.NAVIGATE, fieldId: 'second' }
+        }
+      ]
+    }
+  ] as unknown as Variable[]
+  const jumpAndCalculate: Logic[] = [
+    ...logics,
+    {
+      fieldId: 'q2',
+      payloads: [
+        {
+          id: 'p2',
+          condition: { comparison: ComparisonEnum.IS, expected: 'a' },
+          action: {
+            kind: ActionEnum.CALCULATE,
+            variable: 'score',
+            operator: 'addition',
+            value: 6
+          } as any
+        }
+      ]
+    }
+  ]
+  const form = [question, later, first, second]
+  const answers = { q2: 'a' }
+
+  expect(resolveEnding(form, jumpAndCalculate, variables, answers, true)?.id).toBe('first')
+  expect(resolveEnding(form, jumpAndCalculate, variables, answers, false)?.id).toBe('second')
+})
+
 test('resolving an ending leaves the fields untouched', () => {
   const stored = [{ ...question }, { ...first }, { ...second }]
 

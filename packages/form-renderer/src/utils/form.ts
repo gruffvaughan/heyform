@@ -231,7 +231,7 @@ export function calculateProgress(fields: IFormField[], values: AnyMap) {
   const questions = fields.filter(
     f => f.kind !== FieldKindEnum.GROUP && QUESTION_FIELD_KINDS.includes(f.kind)
   )
-  const answerCount = questions.filter(f => validateRequiredField(f, values)).length
+  const answerCount = questions.filter(f => helper.isValid(values[f.id])).length
 
   return {
     questionCount: questions.length,

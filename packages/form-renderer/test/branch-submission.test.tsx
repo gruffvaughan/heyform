@@ -416,6 +416,17 @@ test('progress does not count a cleared answer', async () => {
   expect(currentPercentage()).toBe('33')
 })
 
+test('progress counts declining optional legal terms as an answer', async () => {
+  const terms: FormField = { id: 'terms', kind: FieldKindEnum.LEGAL_TERMS, title: 'terms' }
+
+  await mount([terms, question('q2'), ending('end')], [], { terms: false })
+
+  await submit()
+
+  expect(currentQuestion()).toBe('q2')
+  expect(currentPercentage()).toBe('50')
+})
+
 test('progress reaches 100% on a route through a group, which is not itself a question', async () => {
   const group: FormField = { id: 'group', kind: FieldKindEnum.GROUP, title: 'group' }
   const child = (id: string): FormField => ({ ...question(id), parent: group })

@@ -255,7 +255,7 @@ export const Blocks = () => {
     // The URL bar showing or hiding also resizes the window, so only follow what typing needs.
     if (
       window.heyform.device.android &&
-      activeElement?.matches('input, textarea, [contenteditable="true"]')
+      activeElement?.matches('input, textarea, iframe, [contenteditable="true"]')
     ) {
       activeElement.scrollIntoView()
     }

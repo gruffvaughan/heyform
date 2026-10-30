@@ -8,14 +8,13 @@ import RCForm, { Field, useForm } from 'rc-field-form'
 import { FC, ReactNode, useEffect, useMemo, useState } from 'react'
 
 import {
-  getNavigateFieldId,
   sendMessageToParent,
   sliceFieldsByLogics,
   useEnterKey,
   useTranslation,
   validateLogicField
 } from '../utils'
-import { applyLogicToFields, validateFields } from '@heyform-inc/answer-utils'
+import { applyLogicToFields, resolveEnding, validateFields } from '@heyform-inc/answer-utils'
 import { clone, helper } from '@heyform-inc/utils'
 
 import { Submit } from '../components'
@@ -153,15 +152,6 @@ export const Form: FC<FormProps> = ({
           }
         }
 
-        // Submit form
-        await state.onSubmit?.(values, isPartialSubmission, state.stripe)
-
-        if (helper.isTrue(state.query.hideAfterSubmit)) {
-          sendMessageToParent('HIDE_EMBED_MODAL')
-        }
-
-        setLoading(false)
-
         const { variables } = applyLogicToFields(
           clone([...state.allFields, ...state.thankYouFields].filter(Boolean) as FormField[]),
           state.logics,
@@ -169,7 +159,7 @@ export const Form: FC<FormProps> = ({
           values
         )
 
-        const thankYouFieldId = getNavigateFieldId(
+        const ending = resolveEnding(
           field,
           state.thankYouFields,
           state.logics,
@@ -178,11 +168,22 @@ export const Form: FC<FormProps> = ({
           variables
         )
 
+        // Submit form, unless this ending keeps its responses out of the form
+        if (!ending?.properties?.discardSubmission) {
+          await state.onSubmit?.(values, isPartialSubmission, state.stripe)
+        }
+
+        if (helper.isTrue(state.query.hideAfterSubmit)) {
+          sendMessageToParent('HIDE_EMBED_MODAL')
+        }
+
+        setLoading(false)
+
         dispatch({
           type: 'setIsSubmitted',
           payload: {
             isSubmitted: true,
-            thankYouFieldId: thankYouFieldId || state.thankYouFields[0]?.id
+            thankYouFieldId: ending?.id
           }
         })
 

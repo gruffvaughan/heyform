@@ -359,7 +359,6 @@ test('file upload accepts a chosen file that submit has not uploaded yet', () =>
   expect(validate(requiredRule, file)).toBe(undefined)
   // Matched by tag, as the renderer's isFile does, not by instanceof.
   expect(validate(requiredRule, { ...fileShape, [Symbol.toStringTag]: 'File' })).toBe(undefined)
-  // A submitted answer shaped like a file still needs an upload URL.
   expect(() => validate(optionalRule, fileShape)).toThrowError()
 })
 

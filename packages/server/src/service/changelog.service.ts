@@ -1,38 +1,47 @@
 import { Injectable } from '@nestjs/common'
 import got from 'got'
 
+import { RedisService } from './redis.service'
+import { toJSON } from '@heyform-inc/utils'
+
 interface GitHubRelease {
   id: number
   tag_name: string
-  name: string
   body: string
   html_url: string
   published_at: string
 }
 
+interface LatestRelease {
+  id: number
+  version: string
+  changelog: string
+  url: string
+  publishedAt: string
+}
+
 const GITHUB_API_URL = 'https://api.github.com/repos/heyform/heyform/releases'
-const CACHE_TTL_MS = 5 * 60 * 1000
-type LatestRelease = Pick<GitHubRelease, 'id'> & { publishedAt: string }
+const LATEST_CACHE_KEY = 'changelog:latest'
+const CACHE_TTL = '1d'
+const FAILURE_CACHE_TTL = '5m'
 
 @Injectable()
 export class ChangelogService {
-  private latestRelease: LatestRelease | null = null
-  private latestExpiresAt = 0
-  private pendingLatest?: Promise<LatestRelease | null>
+  constructor(private readonly redisService: RedisService) {}
 
   async getLatestRelease(): Promise<LatestRelease | null> {
-    if (Date.now() < this.latestExpiresAt) return this.latestRelease
-    if (this.pendingLatest) return this.pendingLatest
+    const cached = await this.redisService.get(LATEST_CACHE_KEY)
 
-    this.pendingLatest = this.fetchLatestRelease()
-    try {
-      return await this.pendingLatest
-    } finally {
-      this.pendingLatest = undefined
+    if (cached) {
+      return toJSON<LatestRelease>(cached) ?? null
     }
+
+    return this.fetchLatestRelease()
   }
 
   private async fetchLatestRelease(): Promise<LatestRelease | null> {
+    let release: LatestRelease | null = null
+
     try {
       const result = await got
         .get(`${GITHUB_API_URL}/latest`, {
@@ -45,35 +54,24 @@ export class ChangelogService {
         })
         .json<GitHubRelease>()
 
-      this.latestRelease = {
+      release = {
         id: result.id,
+        version: result.tag_name,
+        changelog: result.body || '',
+        url: result.html_url,
         publishedAt: result.published_at
       }
     } catch {
-      // The update badge is optional: keep the last release during GitHub outages.
-    } finally {
-      // Cache failures too, so each workspace visit doesn't retry a rate-limited API.
-      this.latestExpiresAt = Date.now() + CACHE_TTL_MS
+      // The update badge is optional: GitHub outages simply mean no changelog.
     }
 
-    return this.latestRelease
-  }
+    // Cache failures briefly, so each workspace visit doesn't retry a rate-limited API.
+    await this.redisService.set({
+      key: LATEST_CACHE_KEY,
+      value: JSON.stringify(release),
+      duration: release ? CACHE_TTL : FAILURE_CACHE_TTL
+    })
 
-  async getAllReleases() {
-    const result = await got
-      .get(GITHUB_API_URL, {
-        headers: {
-          Accept: 'application/vnd.github.v3+json',
-          'User-Agent': 'Heyform-Changelog'
-        }
-      })
-      .json<GitHubRelease[]>()
-
-    return result.map(r => ({
-      id: r.id,
-      title: r.name || r.tag_name,
-      content: r.body || '',
-      publishedAt: r.published_at
-    }))
+    return release
   }
 }

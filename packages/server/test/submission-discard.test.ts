@@ -228,6 +228,32 @@ async function testFormsWithVariableRulesAreLeftToTheRenderer() {
   assert.strictEqual(calls.create, 1)
 }
 
+// The renderer drops a group with no questions, so q1's destination falls through to q2 and
+// its ending. The server must not follow the empty group on to the next field in stored order.
+async function testEmptyGroupsAreLeftOffTheRoute() {
+  const { calls, submit } = setup({
+    ...form,
+    fields: [
+      { ...form.fields[0], nextFieldId: 'empty' },
+      {
+        id: 'q2',
+        title: 'Q2',
+        kind: FieldKindEnum.SHORT_TEXT,
+        validations: {},
+        nextFieldId: 'end'
+      },
+      { id: 'empty', title: 'Empty', kind: FieldKindEnum.GROUP, properties: { fields: [] } },
+      form.fields[3],
+      form.fields[2]
+    ],
+    logics: []
+  })
+
+  await submit({ q1: 'yes', q2: 'yes' })
+
+  assert.strictEqual(calls.create, 1)
+}
+
 async function main() {
   await testDiscardingEndingStoresAndSendsNothing()
   await testOtherRoutesAreStillSaved()
@@ -237,6 +263,7 @@ async function main() {
   await testPaymentRouteThatChangesTheEndingIsSaved()
   await testPaymentFieldLaterInTheFormStillDiscards()
   await testFormsWithVariableRulesAreLeftToTheRenderer()
+  await testEmptyGroupsAreLeftOffTheRoute()
 }
 
 main().catch(err => {

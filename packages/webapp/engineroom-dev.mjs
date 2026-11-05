@@ -13,7 +13,11 @@ const server = await createServer({
     host: '127.0.0.1',
     port: Number(process.env.PORT),
     strictPort: true,
-    allowedHosts: ['.strmnshltr.dev']
+    allowedHosts: ['.strmnshltr.dev'],
+    // OAuth callbacks are rendered by the server, which vite.config.mts doesn't proxy
+    proxy: {
+      '/connect': { target: process.env.VITE_PROXY_TARGET, changeOrigin: true }
+    }
   }
 })
 await server.listen()

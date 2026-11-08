@@ -561,6 +561,10 @@ button.heyform-choice-action {
 .heyform-render-root {
   @apply h-screen w-screen overflow-hidden;
   height: 100dvh;
+
+  &::empty {
+    @apply flex items-center justify-center;
+  }
 }
 
 .heyform-root,

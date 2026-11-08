@@ -13,11 +13,18 @@ export function isNumber(arg: any): boolean {
 }
 
 export function isMobilePhone(arg: any): boolean {
+  // libphonenumber throws on anything but a string
+  if (typeof arg !== 'string') {
+    return false
+  }
+
   const phoneNumber = parsePhoneNumberFromString(arg)
   return !!phoneNumber?.isValid()
 }
 
-const REGEX_FORMAT = /\[([^\]]+)]|Y{4}|M{2}|D{2}|H{1,2}|h{1,2}|a|A|m{1,2}|s{1,2}|Z{1,2}|SSS/g
+// A bracketed literal can't contain "[", so a format full of unclosed "[" is scanned once
+// instead of once per bracket (polynomial backtracking)
+const REGEX_FORMAT = /\[([^\][]+)]|Y{4}|M{2}|D{2}|H{1,2}|h{1,2}|a|A|m{1,2}|s{1,2}|Z{1,2}|SSS/g
 const REGEX_NUMBERS = /(\d){1,4}/g
 
 export function getDateFormat(format: string, allowTime?: boolean): string {
@@ -25,6 +32,11 @@ export function getDateFormat(format: string, allowTime?: boolean): string {
 }
 
 export function isDate(input: string, format = 'MM/DD/YYYY'): boolean {
+  // A date range's start/end comes straight from the request and may not be a string
+  if (typeof input !== 'string') {
+    return false
+  }
+
   const inputArr = input.match(REGEX_NUMBERS)
   const formatArr = format.match(REGEX_FORMAT)
 

@@ -62,11 +62,15 @@ async function mount(
   query: Record<string, any> = {}
 ) {
   const onSubmit = vi.fn(async () => {})
-  const thankYouFields = fields.filter(field => field.kind === FieldKindEnum.THANK_YOU)
+  // Like Renderer.tsx initStore: only top-level endings are thankYouFields, and an ending
+  // nested in a group stays in allFields with its group.
+  const isTopLevelEnding = (field: FormField) =>
+    field.kind === FieldKindEnum.THANK_YOU && !(field as any).parent
+  const thankYouFields = fields.filter(isTopLevelEnding)
   const initialState: IState = {
     instanceId: 'test',
     formId: 'branch-test',
-    allFields: fields.filter(field => field.kind !== FieldKindEnum.THANK_YOU),
+    allFields: fields.filter(field => !isTopLevelEnding(field)),
     thankYouFields,
     hiddenFields: [],
     jumpFieldIds: logics.map(logic => logic.fieldId),
@@ -347,47 +351,6 @@ test.each(['Producer', ''])(
   }
 )
 
-test.each([
-  ['optional', false, false],
-  ['required', true, false],
-  ['optional, on a branch', false, true]
-])(
-  'a chosen file on an %s upload question does not send submit back to it',
-  async (_, required, branched) => {
-    const cv: FormField = {
-      id: 'cv',
-      kind: FieldKindEnum.FILE_UPLOAD,
-      title: 'cv',
-      validations: { required }
-    }
-    // The renderer holds the File itself; it is uploaded only after the route validates.
-    const file = new File(['cv'], 'cv.pdf', { type: 'application/pdf' })
-    const fields = branched
-      ? [question('role', true), question('other-role'), cv, question('last'), ending('end')]
-      : [cv, question('last'), ending('end')]
-    const values = branched ? { role: 'producer', cv: file } : { cv: file }
-    const onSubmit = await mount(
-      fields,
-      branched ? [navigate('role', 'cv', 'producer')] : [],
-      values
-    )
-
-    // Move to the last question with the earlier answers in place.
-    await submit()
-    if (branched) await submit()
-    expect(currentQuestion()).toBe('last')
-
-    expect(currentPercentage()).toBe(branched ? '67' : '50')
-
-    await answer('done')
-    await submit()
-
-    expect(onSubmit).toHaveBeenCalledOnce()
-    expect(onSubmit).toHaveBeenCalledWith({ ...values, last: 'done' }, false, undefined)
-    expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('end')
-  }
-)
-
 test('progress counts only the questions on the route the answers chose', async () => {
   await mount(
     [question('q1'), question('skipped'), question('q3'), question('q4'), ending('end')],
@@ -533,6 +496,62 @@ test('progress reaches 100% on a route through a group, which is not itself a qu
   expect(currentPercentage()).toBe('100')
 })
 
+function upload(required: boolean): FormField {
+  return { id: 'cv', kind: FieldKindEnum.FILE_UPLOAD, title: 'cv', validations: { required } }
+}
+
+// The renderer holds a chosen File as the answer; it is uploaded only after the route validates.
+function chosenFile() {
+  return new File(['cv'], 'cv.pdf', { type: 'application/pdf' })
+}
+
+test.each([
+  ['an optional', false],
+  ['a required', true]
+])('a chosen file on %s upload question does not send submit back to it', async (_, required) => {
+  const file = chosenFile()
+  const onSubmit = await mount([upload(required), question('last'), ending('end')], [], {
+    cv: file
+  })
+
+  await submit()
+  expect(currentQuestion()).toBe('last')
+
+  await answer('done')
+  await submit()
+
+  expect(onSubmit).toHaveBeenCalledWith({ cv: file, last: 'done' }, false, undefined)
+  expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('end')
+})
+
+test('a chosen file on an upload question reached by a jump does not send submit back to it', async () => {
+  const file = chosenFile()
+  const onSubmit = await mount(
+    [
+      question('role', true),
+      question('other-role'),
+      upload(false),
+      question('last'),
+      ending('end')
+    ],
+    [navigate('role', 'cv', 'producer')],
+    { role: 'producer', cv: file }
+  )
+
+  await submit()
+  await submit()
+  expect(currentQuestion()).toBe('last')
+
+  await answer('done')
+  await submit()
+
+  expect(onSubmit).toHaveBeenCalledWith(
+    { role: 'producer', cv: file, last: 'done' },
+    false,
+    undefined
+  )
+  expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('end')
+})
 function discardingEnding(id: string): FormField {
   return { ...ending(id), properties: { discardSubmission: true } }
 }
@@ -574,6 +593,21 @@ test('a discarding first ending catches routes that fall through to it', async (
 
   expect(onSubmit).not.toHaveBeenCalled()
   expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('not-eligible')
+})
+
+test('a jump to an ending nested in a group falls back to the first top-level ending', async () => {
+  const group: FormField = { id: 'group', kind: FieldKindEnum.GROUP, title: 'group' }
+  const nested = { ...discardingEnding('nested'), parent: group } as FormField
+  const onSubmit = await mount(
+    [question('q1'), group, nested, ending('end')],
+    [navigate('q1', 'nested', 'no')]
+  )
+
+  await answer('no')
+  await submit()
+
+  expect(onSubmit).toHaveBeenCalledWith({ q1: 'no' }, false, undefined)
+  expect(container.querySelector('output')?.getAttribute('data-ending')).toBe('end')
 })
 
 test('a required question skipped on a discarding route still blocks the ending', async () => {

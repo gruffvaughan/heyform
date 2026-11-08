@@ -28,7 +28,9 @@ import {
   GqlClient,
   assertFormIsAcceptingSubmissions,
   assertSafeSpecialFieldAnswers,
+  collectChoiceLimits,
   isSubmissionDiscarded,
+  isTimeLimitUp,
   normalizeSubmissionHiddenFields,
   resolvePaymentConfiguration,
   selectSubmissionFields
@@ -74,14 +76,6 @@ export class CompleteSubmissionResolver {
       throw new BadRequestException('The form does not have content')
     }
 
-    if (
-      form.settings.enableIpLimit &&
-      helper.isValid(form.settings.ipLimitCount) &&
-      form.settings.ipLimitCount > 0
-    ) {
-      await this.submissionIpLimitService.checkIp(form, client.ip)
-    }
-
     // Check password
     if (form.settings.requirePassword) {
       const passwordToken = this.endpointService.decryptToken(input.passwordToken)
@@ -96,13 +90,19 @@ export class CompleteSubmissionResolver {
 
     // Start submit time
     const openToken = this.endpointService.decryptToken(input.openToken)
+    const isPartialSubmission = input.partialSubmission === true
 
     const startAt = this.endpointService.assertOpenToken(
       openToken,
       input.formId,
       form.settings,
-      now
+      now,
+      { allowTimeUpGrace: isPartialSubmission }
     )
+
+    // The time limit's own submission (Header.tsx): store what was answered on the route,
+    // without the required questions the respondent had no time left for
+    const isTimeUp = isPartialSubmission && isTimeLimitUp(form.settings, startAt, now)
 
     // Bot prevention check
     if (form.settings?.captchaKind !== CaptchaKindEnum.NONE) {
@@ -126,29 +126,40 @@ export class CompleteSubmissionResolver {
       const fields = selectSubmissionFields(
         logicResult.fields,
         form.logics,
-        input.partialSubmission === true
+        isPartialSubmission,
+        isTimeUp
       )
       assertSafeSpecialFieldAnswers(fields, input.answers)
       variableValues = logicResult.variables
 
-      answers = fieldValuesToAnswers(fields, input.answers)
+      answers = isTimeUp
+        ? fieldValuesToAnswers(fields, input.answers, true).filter(answer =>
+            helper.isValid(answer.value)
+          )
+        : fieldValuesToAnswers(fields, input.answers)
       variables = form.variables?.map(variable => ({
         ...variable,
         value: variableValues[variable.id]
       }))
-      isDiscarded = isSubmissionDiscarded(
-        form,
-        flattenedFields,
-        input.answers,
-        input.partialSubmission === true
-      )
+      isDiscarded = isSubmissionDiscarded(form, flattenedFields, input.answers, isPartialSubmission)
     } catch (err) {
       throw new BadRequestException(err.response)
     }
 
-    // The respondent still sees the ending, but nothing is stored or sent on
-    if (isDiscarded) {
+    // The respondent still sees the ending, but nothing is stored or sent on. Likewise when
+    // the time ran out before anything valid was answered: there is no response to keep.
+    if (isDiscarded || (isTimeUp && answers.length < 1)) {
       return {}
+    }
+
+    const isIpLimited =
+      form.settings.enableIpLimit &&
+      helper.isValid(form.settings.ipLimitCount) &&
+      form.settings.ipLimitCount > 0
+
+    // checkIp() counts the submission, so it runs only once the response is going to be stored
+    if (isIpLimited) {
+      await this.submissionIpLimitService.checkIp(form, client.ip)
     }
 
     let category = SubmissionCategoryEnum.INBOX
@@ -198,23 +209,37 @@ export class CompleteSubmissionResolver {
       form.settings.quotaLimit! > 0
         ? form.settings.quotaLimit
         : undefined
-    const submissionId = await this.submissionService.createWithinQuota(
-      {
-        teamId: form.teamId,
-        formId: form.id,
-        category,
-        title: form.name,
-        answers,
-        hiddenFields: normalizeSubmissionHiddenFields(form.hiddenFields, input.hiddenFields),
-        variables,
-        startAt,
-        endAt,
-        ip: DISABLE_SUBMISSION_IP ? undefined : client.ip,
-        userAgent: client.userAgent,
-        status
-      },
-      quotaLimit
-    )
+    const choiceLimits = collectChoiceLimits(flattenFields(form.fields, true), answers)
+    let submissionId: string
+
+    try {
+      submissionId = await this.submissionService.createWithinQuota(
+        {
+          teamId: form.teamId,
+          formId: form.id,
+          category,
+          title: form.name,
+          answers,
+          hiddenFields: normalizeSubmissionHiddenFields(form.hiddenFields, input.hiddenFields),
+          variables,
+          startAt,
+          endAt,
+          ip: DISABLE_SUBMISSION_IP ? undefined : client.ip,
+          userAgent: client.userAgent,
+          status
+        },
+        quotaLimit,
+        choiceLimits
+      )
+    } catch (err) {
+      // Nothing was stored, so the attempt must not use up the IP limit: a respondent told
+      // that an option is full can still pick another one
+      if (isIpLimited) {
+        await this.submissionIpLimitService.releaseIp(form, client.ip)
+      }
+
+      throw err
+    }
 
     // Payment
     const result: CompleteSubmissionType = {}

@@ -38,6 +38,14 @@ interface SubmissionCellProps extends SubmissionHeaderCellProps {
 
 const ICON_CONFIGS = [...ALL_FIELD_CONFIGS, ...CUSTOM_FIELDS_CONFIGS]
 
+// Stored answers can predate validation, so only plain values are rendered: React throws on an
+// object child, which would take the whole table down.
+function toText(value: unknown): string | undefined {
+  if (helper.isString(value) || helper.isNumber(value) || helper.isBoolean(value)) {
+    return String(value)
+  }
+}
+
 const AddressItem: FC<SubmissionCellProps> = ({ answer, field, isTableCell }) => {
   const { t } = useTranslation()
 
@@ -51,7 +59,7 @@ const AddressItem: FC<SubmissionCellProps> = ({ answer, field, isTableCell }) =>
     answer.value.city,
     answer.value.state,
     answer.value.zip
-  ]
+  ].map(toText)
 
   if (isTableCell) {
     return <span className="text-nowrap">{value.filter(helper.isValid).join(', ')}</span>
@@ -103,7 +111,7 @@ const DateRangeItem: FC<SubmissionCellProps> = ({ answer, field, isTableCell }) 
         truncate: isTableCell
       })}
     >
-      {[answer.value.start, answer.value.end].filter(Boolean).join(' - ')}
+      {[answer.value.start, answer.value.end].map(toText).filter(Boolean).join(' - ')}
     </div>
   )
 }
@@ -153,7 +161,7 @@ const FullNameItem: FC<SubmissionCellProps> = ({ answer, field, isTableCell }) =
         truncate: isTableCell
       })}
     >
-      {[answer.value.firstName, answer.value.lastName].filter(Boolean).join(' ')}
+      {[answer.value.firstName, answer.value.lastName].map(toText).filter(Boolean).join(' ')}
     </div>
   )
 }
@@ -172,7 +180,7 @@ const InputTableItem: FC<SubmissionCellProps> = ({ answer, field, isTableCell })
   const result = answer.value
     .map((row: AnyMap) => {
       if (helper.isObject(row)) {
-        return columns.map(c => row[c.id])
+        return columns.map(c => toText(row[c.id]) ?? '')
       }
     })
     .filter(Boolean) as string[][]
@@ -192,7 +200,7 @@ const InputTableItem: FC<SubmissionCellProps> = ({ answer, field, isTableCell })
     <div className="scrollbar overflow-x-auto">
       <table className="min-w-full text-left text-sm">
         <thead className="text-secondary">
-          <tr className="border-accent border-b">
+          <tr className="border-b border-[rgba(var(--hf-dashboard-border))]">
             {columns.map(c => (
               <th key={c.id} className="text-nowrap py-2 text-left font-normal">
                 {c.label}
@@ -204,7 +212,7 @@ const InputTableItem: FC<SubmissionCellProps> = ({ answer, field, isTableCell })
           {result.map((row, index) => (
             <tr
               key={index}
-              className="border-accent hover:bg-primary/[2.5%] border-b last:border-b-0"
+              className="hover:bg-primary/[2.5%] border-b border-[rgba(var(--hf-dashboard-border))] last:border-b-0"
             >
               {row.map((cell, index) => (
                 <td key={index} className="h-10 text-nowrap py-2 text-left">
@@ -236,14 +244,16 @@ const MultipleChoiceItem: FC<SubmissionCellProps> = ({ answer, field, isTableCel
     return null
   }
 
-  const result = choices.filter(c => answer.value.value?.includes(c.id))
+  const selected: unknown[] = helper.isArray(answer.value.value) ? answer.value.value : []
+  const result = choices.filter(c => selected.includes(c.id))
 
   if (hasOther) {
     result.push({
       id: OTHER_CHOICE_ID,
-      label: helper.isValid(answer.value.other)
-        ? answer.value.other
-        : String(t('form.builder.compose.otherChoice'))
+      label:
+        helper.isString(answer.value.other) && helper.isValid(answer.value.other)
+          ? answer.value.other
+          : String(t('form.builder.compose.otherChoice'))
     })
   }
 
@@ -337,8 +347,12 @@ const PaymentItem: FC<SubmissionCellProps> = ({ answer, field }) => {
     return null
   }
 
-  const amount = answer.value.amount || 0
-  const amountString = CURRENCY_SYMBOLS[answer.value.currency] + Big(amount).div(100).toFixed(2)
+  // Big() throws on anything that isn't a finite number (including "+1")
+  const amount = Number.isFinite(Number(answer.value.amount)) ? Number(answer.value.amount) : 0
+  const currency = String(answer.value.currency ?? field.properties?.currency ?? '').toUpperCase()
+  const amountString =
+    (CURRENCY_SYMBOLS[currency] ?? (currency ? `${currency} ` : '')) +
+    Big(amount).div(100).toFixed(2)
   const isCompleted = helper.isValid(answer.value.paymentIntentId)
   const receiptUrl = isTrustedStripeReceiptUrl(answer.value.receiptUrl)
     ? answer.value.receiptUrl
@@ -348,12 +362,12 @@ const PaymentItem: FC<SubmissionCellProps> = ({ answer, field }) => {
     <div className="flex items-center">
       <div className="flex flex-1 items-center overflow-hidden truncate">
         {isCompleted ? (
-          <div className="flex h-6 items-center rounded bg-green-100 pl-1 pr-2 text-sm text-green-800">
+          <div className="flex h-6 items-center rounded bg-green-100 pl-1 pr-2 text-sm text-green-800 dark:bg-green-500/15 dark:text-green-400">
             <IconCheck className="h-4 w-4" />
             <span className="ml-1">Succeeded</span>
           </div>
         ) : (
-          <div className="text-primary flex h-6 items-center rounded bg-gray-100 pl-1 pr-2 text-sm">
+          <div className="text-primary flex h-6 items-center rounded bg-gray-100 pl-1 pr-2 text-sm dark:bg-white/10">
             <IconClock className="h-4 w-4" />
             <span className="ml-1">Incomplete</span>
           </div>

@@ -1,14 +1,19 @@
+import { BadRequestException } from '@nestjs/common'
+
 import { Auth, User } from '@decorator'
 import { UpdateUserInput } from '@graphql'
 import { helper } from '@heyform-inc/utils'
 import { UserLangEnum, UserModel } from '@model'
 import { Args, Mutation, Resolver } from '@nestjs/graphql'
-import { UserService } from '@service'
+import { SocialLoginService, UserService } from '@service'
 
 @Resolver()
 @Auth()
 export class UpdateUserResolver {
-  constructor(private readonly userService: UserService) {}
+  constructor(
+    private readonly userService: UserService,
+    private readonly socialLoginService: SocialLoginService
+  ) {}
 
   @Mutation(returns => Boolean)
   async updateUser(
@@ -18,6 +23,10 @@ export class UpdateUserResolver {
     const updates: Record<string, string | number> = {}
 
     if (helper.isValid(input.name)) {
+      if (input.name !== user.name && (await this.socialLoginService.isNameManaged(user.id))) {
+        throw new BadRequestException('Your name is managed by your identity provider')
+      }
+
       updates.name = input.name
     }
 

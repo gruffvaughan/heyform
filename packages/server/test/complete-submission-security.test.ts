@@ -67,7 +67,7 @@ async function testPaymentUsesPublishedFormConfiguration() {
   const paymentService = {
     createPaymentIntent: async (options: Record<string, any>) => {
       paymentIntent = options
-      return 'client_secret_1'
+      return { id: 'pi_1', clientSecret: 'client_secret_1' }
     }
   }
   const resolver = new CompleteSubmissionResolver(
@@ -115,7 +115,12 @@ async function testPaymentUsesPublishedFormConfiguration() {
   assert.strictEqual(storedSubmission?.answers[1].value.amount, 1000)
   assert.strictEqual(storedSubmission?.answers[1].value.currency, 'eur')
   assert.strictEqual(storedSubmission?.answers[0].value.clientSecret, undefined)
-  assert.strictEqual(updatedAnswer, undefined)
+  // Only the PaymentIntent created here is accepted by the webhook, and the answer isn't paid yet
+  assert.strictEqual(updatedAnswer?.id, 'payment_1')
+  assert.strictEqual(updatedAnswer?.value.pendingPaymentIntentId, 'pi_1')
+  assert.strictEqual(updatedAnswer?.value.paymentIntentId, undefined)
+  assert.strictEqual(updatedAnswer?.value.amount, 4999)
+  assert.strictEqual(updatedAnswer?.value.clientSecret, undefined)
 }
 
 async function testPaymentWebhookDoesNotRequireOrPersistClientSecret() {
@@ -152,7 +157,8 @@ async function testPaymentWebhookDoesNotRequireOrPersistClientSecret() {
             value: {
               amount: 4999,
               currency: 'usd',
-              clientSecret: 'legacy_stored_secret'
+              clientSecret: 'legacy_stored_secret',
+              pendingPaymentIntentId: 'pi_1'
             }
           }
         ]
@@ -166,6 +172,7 @@ async function testPaymentWebhookDoesNotRequireOrPersistClientSecret() {
   await controller.webhook('valid_signature', { body: Buffer.from('{}') })
 
   assert.strictEqual(updatedAnswer?.value.clientSecret, undefined)
+  assert.strictEqual(updatedAnswer?.value.pendingPaymentIntentId, undefined)
   assert.strictEqual(updatedAnswer?.value.paymentIntentId, 'pi_1')
   assert.strictEqual(updatedAnswer?.value.billingDetails.name, 'Respondent')
 }

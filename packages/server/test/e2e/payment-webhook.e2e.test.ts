@@ -3,8 +3,9 @@ import { createHmac } from 'crypto'
 
 import { defineSuite } from './helpers/runner'
 
-// The same secret the server reads from STRIPE_CONNECT_SECRET_KEY
-const SECRET = process.env.STRIPE_CONNECT_SECRET_KEY || 'whsec_e2e'
+// The secret the server verifies with, resolved the same way
+const SECRET =
+  process.env.STRIPE_CONNECT_SECRET_KEY || process.env.STRIPE_WEBHOOK_SECRET_KEY || 'whsec_e2e'
 
 // Stripe's scheme: HMAC-SHA256 of `${timestamp}.${raw body}`, so only the unparsed body verifies
 function sign(body: string, secret = SECRET) {

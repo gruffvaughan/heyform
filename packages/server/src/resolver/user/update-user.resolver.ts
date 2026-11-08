@@ -22,8 +22,9 @@ export class UpdateUserResolver {
   ): Promise<boolean> {
     const updates: Record<string, string | number> = {}
 
-    if (helper.isValid(input.name)) {
-      if (input.name !== user.name && (await this.socialLoginService.isNameManaged(user.id))) {
+    // An unchanged name isn't written back, so it can't undo a sign-in that just synced it
+    if (helper.isValid(input.name) && input.name !== user.name) {
+      if (await this.socialLoginService.isNameManaged(user.id)) {
         throw new BadRequestException('Your name is managed by your identity provider')
       }
 

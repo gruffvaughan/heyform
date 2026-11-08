@@ -43,7 +43,7 @@ async function testManagedNameCannotBeChanged() {
     await resolver.updateUser(user as any, { name: 'Synced Name', avatar: 'https://a/b.png' }),
     true
   )
-  assert.deepStrictEqual(users.updates, [{ name: 'Synced Name', avatar: 'https://a/b.png' }])
+  assert.deepStrictEqual(users.updates, [{ avatar: 'https://a/b.png' }])
 }
 
 async function testUnmanagedNameCanBeChanged() {

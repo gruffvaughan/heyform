@@ -1,11 +1,10 @@
 import assert from 'assert'
 
-import { PublicFormResolver } from '../src/resolver/form/form-detail.resolver'
-
-// The resolver reads the key when it's imported
+// The resolver reads the key when it's loaded, so load it only after setting the key
 process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_1'
 
-function resolve(form: Record<string, any>) {
+async function resolve(form: Record<string, any>) {
+  const { PublicFormResolver } = await import('../src/resolver/form/form-detail.resolver')
   const resolver = new PublicFormResolver(
     {
       findPublicForm: async () => ({

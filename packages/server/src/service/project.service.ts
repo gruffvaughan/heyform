@@ -24,6 +24,33 @@ export class ProjectService {
       })
   }
 
+  // The project a member who joins the workspace lands in: the one created with the team. Newest
+  // first is what every other listing wants, so this asks the other way round.
+  async findDefaultInTeam(teamId: string): Promise<ProjectModel | null> {
+    return this.projectModel
+      .findOne({
+        teamId
+      })
+      .sort({
+        createdAt: 1
+      })
+  }
+
+  // A member of the workspace who belongs to no project can see none of its forms, so a joiner
+  // starts in the project the workspace was created with. Removing or leaving the workspace
+  // already deletes the project memberships.
+  async addMemberToDefaultProject(teamId: string, memberId: string): Promise<void> {
+    const project = await this.findDefaultInTeam(teamId)
+
+    // A project can already name this member before they join the workspace
+    if (project && !(await this.findMemberById(project.id, memberId))) {
+      await this.createMember({
+        projectId: project.id,
+        memberId
+      })
+    }
+  }
+
   async findOne(conditions: any) {
     return this.projectModel.findOne(conditions)
   }

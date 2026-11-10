@@ -1141,6 +1141,11 @@
           "placeholder": "Geben Sie hier die Weiterleitungs-URL ein, z.B. https://example.com",
           "invalidUrl": "Die Weiterleitungs-URL ist ungültig"
         },
+        "pseudonymId": {
+          "headline": "Pseudonym-IDs",
+          "subHeadline": "Generieren Sie eine eindeutige Antwort-ID und zeigen Sie sie nach dem Absenden an.",
+          "column": "Antwort-ID"
+        },
         "progressBar": {
           "headline": "Fortschrittsbalken",
           "subHeadline": "Sie können den Befragten leicht mitteilen, wie nah sie daran sind, Ihr Formular abzuschließen."
@@ -1305,6 +1310,10 @@
       "sidebar": {
         "questions": "Fragen",
         "addQuestion": "Frage hinzufügen",
+        "collapseQuestions": "Fragen einklappen",
+        "expandQuestions": "Fragen ausklappen",
+        "hideSettings": "Einstellungsbereich ausblenden",
+        "showSettings": "Einstellungsbereich einblenden",
         "endings": "Endungen",
         "addEndingTip": "Fügen Sie ein neues Ende hinzu. Sie können mehrere Enden erstellen und eine Logik implementieren, um zu bestimmen, welches die Leute sehen werden."
       },

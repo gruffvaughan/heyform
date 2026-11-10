@@ -1141,6 +1141,11 @@
           "placeholder": "Wprowadź tutaj URL przekierowania, np. https://example.com",
           "invalidUrl": "URL przekierowania jest nieprawidłowy"
         },
+        "pseudonymId": {
+          "headline": "Identyfikatory pseudonimowe",
+          "subHeadline": "Generuj unikalny identyfikator odpowiedzi i wyświetlaj go po przesłaniu.",
+          "column": "Identyfikator odpowiedzi"
+        },
         "progressBar": {
           "headline": "Pasek postępu",
           "subHeadline": "Możesz łatwo poinformować respondentów, jak blisko są ukończenia formularza."
@@ -1301,6 +1306,10 @@
       "sidebar": {
         "questions": "Pytania",
         "addQuestion": "Dodaj pytanie",
+        "collapseQuestions": "Zwiń pytania",
+        "expandQuestions": "Rozwiń pytania",
+        "hideSettings": "Ukryj panel ustawień",
+        "showSettings": "Pokaż panel ustawień",
         "endings": "Zakończenia",
         "addEndingTip": "Dodaj nowe zakończenie. Możesz stworzyć wiele zakończeń i wdrożyć logikę, aby określić, które z nich zobaczą ludzie."
       },

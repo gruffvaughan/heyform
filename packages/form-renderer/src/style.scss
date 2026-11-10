@@ -951,6 +951,14 @@ button.heyform-choice-action {
   }
 }
 
+.heyform-pseudonym-id {
+  @apply mt-6 flex items-baseline gap-2 text-lg;
+
+  strong {
+    @apply font-semibold tracking-wider;
+  }
+}
+
 .heyform-statement {
   .heyform-block-title,
   .heyform-block-description,

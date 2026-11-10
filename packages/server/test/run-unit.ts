@@ -35,10 +35,12 @@ const tests = [
   'googlesheets.test.ts',
   'page-apps.test.ts',
   'form-analytic-cache.test.ts',
+  'form-team-scope.test.ts',
+  'join-team-project.test.ts',
   'submission-choice-limit.test.ts',
-  'public-form-stripe.test.ts',
   'complete-submission-security.test.ts',
-  'payment-webhook.test.ts'
+  'payment-webhook.test.ts',
+  'public-form-stripe.test.ts'
 ]
 const serverRoot = path.resolve(__dirname, '..')
 

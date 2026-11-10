@@ -1270,6 +1270,11 @@
           "placeholder": "Enter the redirect URL here, e.g., https://example.com",
           "invalidUrl": "The redirect URL is not valid"
         },
+        "pseudonymId": {
+          "headline": "Pseudonym IDs",
+          "subHeadline": "Generate a unique response ID and show it after submission.",
+          "column": "Response ID"
+        },
         "progressBar": {
           "headline": "Progress bar",
           "subHeadline": "You can easily let respondents know how close they are to completing your form."
@@ -1443,6 +1448,10 @@
       "sidebar": {
         "questions": "Questions",
         "addQuestion": "Add question",
+        "collapseQuestions": "Collapse questions",
+        "expandQuestions": "Expand questions",
+        "hideSettings": "Hide settings panel",
+        "showSettings": "Show settings panel",
         "endings": "Endings",
         "addEndingTip": "Add a new ending. You can create multiple endings and implement logic to determine which one people will see."
       },

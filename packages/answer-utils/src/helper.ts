@@ -1,10 +1,10 @@
 import { Property } from '@heyform-inc/shared-types-enums'
-import dayjs from 'dayjs'
 import { parsePhoneNumberFromString } from 'libphonenumber-js'
 
 import { helper } from '@heyform-inc/utils'
 
 import { OTHER_CHOICE_LABEL } from './consts'
+import dayjs, { Dayjs } from './dayjs'
 
 export { htmlToText } from '@heyform-inc/utils'
 
@@ -122,21 +122,67 @@ export function isLessOrEqualThan(arg1: unknown, arg2: unknown): boolean {
 
 const DEFAULT_DATE_FORMAT = 'YYYY-MM-DD'
 
-export function isSameDate(
+// Strict mode rejects a value that does not match the format, including overflow
+// dates such as 31 February that Date.parse would roll into March.
+function parseStrictDate(value: unknown, format: string): Dayjs | undefined {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+
+  const parsed = dayjs(value, format, true)
+
+  return parsed.isValid() ? parsed : undefined
+}
+
+// The answer is produced by the date picker, so it is always in the field's format. The condition's
+// own date is typed by the form owner, who may have used another shape such as `2026-4-3`, and
+// Date.parse used to accept those. Read anything that isn't exactly `YYYY-MM-DD[ HH:mm]`
+// leniently, so a condition saved before the format was enforced keeps matching.
+function parseExpectedDate(value: unknown, format: string): Dayjs | undefined {
+  const strict = parseStrictDate(value, format)
+
+  if (strict) {
+    return strict
+  }
+
+  if (typeof value !== 'string') {
+    return undefined
+  }
+
+  const lenient = dayjs(value)
+
+  return lenient.isValid() ? lenient : undefined
+}
+
+function compareDates(
   value: string,
   expected: string,
-  format = DEFAULT_DATE_FORMAT,
-  allowTime = false
+  format: string,
+  allowTime: boolean,
+  compare: (answer: Dayjs, target: Dayjs) => boolean
 ): boolean {
   // Day.js reads undefined as now, which differs between the browser and the server
   if (helper.isNil(value)) {
     return false
   }
 
-  const valueFormat = getDateFormat(format, allowTime)
-  const expectedFormat = getDateFormat(DEFAULT_DATE_FORMAT, allowTime)
+  const answer = parseStrictDate(value, getDateFormat(format, allowTime))
+  const target = parseExpectedDate(expected, getDateFormat(DEFAULT_DATE_FORMAT, allowTime))
 
-  return dayjs(value, valueFormat).isSame(dayjs(expected, expectedFormat))
+  if (!answer || !target) {
+    return false
+  }
+
+  return compare(answer, target)
+}
+
+export function isSameDate(
+  value: string,
+  expected: string,
+  format = DEFAULT_DATE_FORMAT,
+  allowTime = false
+): boolean {
+  return compareDates(value, expected, format, allowTime, (answer, target) => answer.isSame(target))
 }
 
 export function isBeforeDate(
@@ -145,15 +191,9 @@ export function isBeforeDate(
   format = DEFAULT_DATE_FORMAT,
   allowTime = false
 ): boolean {
-  // Day.js reads undefined as now, which differs between the browser and the server
-  if (helper.isNil(value)) {
-    return false
-  }
-
-  const valueFormat = getDateFormat(format, allowTime)
-  const expectedFormat = getDateFormat(DEFAULT_DATE_FORMAT, allowTime)
-
-  return dayjs(value, valueFormat).isBefore(dayjs(expected, expectedFormat))
+  return compareDates(value, expected, format, allowTime, (answer, target) =>
+    answer.isBefore(target)
+  )
 }
 
 export function isAfterDate(
@@ -162,15 +202,9 @@ export function isAfterDate(
   format = DEFAULT_DATE_FORMAT,
   allowTime = false
 ): boolean {
-  // Day.js reads undefined as now, which differs between the browser and the server
-  if (helper.isNil(value)) {
-    return false
-  }
-
-  const valueFormat = getDateFormat(format, allowTime)
-  const expectedFormat = getDateFormat(DEFAULT_DATE_FORMAT, allowTime)
-
-  return dayjs(value, valueFormat).isAfter(dayjs(expected, expectedFormat))
+  return compareDates(value, expected, format, allowTime, (answer, target) =>
+    answer.isAfter(target)
+  )
 }
 
 // The respondent's "Other" text, or "Other" itself when they chose it without typing on a

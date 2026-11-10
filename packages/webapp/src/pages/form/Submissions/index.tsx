@@ -15,7 +15,7 @@ import {
   IconTrash
 } from '@tabler/icons-react'
 import { useBoolean, useRequest } from 'ahooks'
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { SubmissionService } from '@/services'
@@ -59,6 +59,8 @@ const SUBMISSION_CATEGORIES = [
   }
 ]
 
+const PSEUDONYM_ID_FIELD_ID = 'pseudonym_id'
+
 export default function FormSubmissions() {
   const { t } = useTranslation()
 
@@ -71,7 +73,10 @@ export default function FormSubmissions() {
   const [category, setCategory] = useState<string>(SubmissionCategoryEnum.INBOX)
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([])
   const [hiddenFieldIds, setHiddenFieldIds] = useState<string[]>([])
+  const [hasPseudonymIds, setHasPseudonymIds] = useState(false)
   const [isMaximized, { toggle }] = useBoolean(false)
+
+  useEffect(() => setHasPseudonymIds(false), [formId])
 
   // Inbox moves to Spam; Spam and Archive move back to the Inbox
   const targetCategory = useMemo(
@@ -125,7 +130,19 @@ export default function FormSubmissions() {
 
   const showIpAddress = !isSubmissionIpDisabled() && !!form?.settings?.displayIpAddress
 
+  // IDs stay visible after the setting is turned off, like in the CSV export
+  const showPseudonymId = !!form?.settings?.generatePseudonymId || hasPseudonymIds
+
   const fields = useMemo(() => {
+    const pseudonymIdField = showPseudonymId
+      ? [
+          {
+            id: PSEUDONYM_ID_FIELD_ID,
+            kind: FieldKindEnum.SHORT_TEXT,
+            title: t('form.settings.general.pseudonymId.column')
+          }
+        ]
+      : []
     const submitDateField = {
       id: FieldKindEnum.SUBMIT_DATE,
       kind: FieldKindEnum.SUBMIT_DATE,
@@ -160,13 +177,14 @@ export default function FormSubmissions() {
       : []
 
     return [
+      ...pseudonymIdField,
       submitDateField,
       ...questionFields,
       ...variables,
       ...hiddenFields,
       ...ipAddressField
     ] as FormField[]
-  }, [form?.drafts, form?.hiddenFields, form?.variables, showIpAddress, t])
+  }, [form?.drafts, form?.hiddenFields, form?.variables, showIpAddress, showPseudonymId, t])
 
   async function fetch({ current, pageSize }: TableFetchParams) {
     const { total, submissions } = await SubmissionService.submissions({
@@ -176,10 +194,24 @@ export default function FormSubmissions() {
       limit: pageSize
     })
 
+    if (submissions.some(row => row.pseudonymId)) {
+      setHasPseudonymIds(true)
+    }
+
     const list = submissions.map(row => ({
       ...row,
       answers: [
         ...row.answers,
+
+        ...(row.pseudonymId
+          ? [
+              {
+                id: PSEUDONYM_ID_FIELD_ID,
+                kind: FieldKindEnum.SHORT_TEXT,
+                value: row.pseudonymId
+              }
+            ]
+          : []),
 
         ...(row.variables || []).map(v => ({
           ...v,

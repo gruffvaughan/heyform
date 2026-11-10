@@ -1203,6 +1203,11 @@
           "placeholder": "Inserisci l'URL di reindirizzamento qui, es. https://esempio.com",
           "invalidUrl": "L'URL di reindirizzamento non è valido"
         },
+        "pseudonymId": {
+          "headline": "ID pseudonimi",
+          "subHeadline": "Genera un ID di risposta univoco e mostralo dopo l'invio.",
+          "column": "ID risposta"
+        },
         "progressBar": {
           "headline": "Barra di avanzamento",
           "subHeadline": "Fai sapere ai rispondenti quanto manca al completamento del modulo."
@@ -1372,6 +1377,10 @@
       "sidebar": {
         "questions": "Domande",
         "addQuestion": "Aggiungi domanda",
+        "collapseQuestions": "Comprimi domande",
+        "expandQuestions": "Espandi domande",
+        "hideSettings": "Nascondi pannello impostazioni",
+        "showSettings": "Mostra pannello impostazioni",
         "endings": "Finali",
         "addEndingTip": "Aggiungi un nuovo finale. Puoi creare più finali e implementare la logica per determinare quale verrà visualizzato."
       },

@@ -1,8 +1,8 @@
 import { AnswerValue, FieldKindEnum, FormField } from '@heyform-inc/shared-types-enums'
-import dayjs from 'dayjs'
 
 import { helper, type } from '@heyform-inc/utils'
 
+import dayjs from './dayjs'
 import { FieldsToValidateRules, fieldsToValidateRules } from './fields-to-validate-rules'
 import { isDate, isMobilePhone } from './helper'
 
@@ -409,10 +409,11 @@ function validateDateRange(rule: FieldsToValidateRules, value: AnswerValue) {
     })
   }
 
-  const start = dayjs(value.start, rule.format!)
-  const end = dayjs(value.end, rule.format!)
+  // rule.format already includes the time token when the field allows it.
+  const start = dayjs(value.start, rule.format!, true)
+  const end = dayjs(value.end, rule.format!, true)
 
-  if (end.isBefore(start)) {
+  if (start.isValid() && end.isValid() && end.isBefore(start)) {
     throw new ValidateError({
       id: rule.id,
       kind: rule.kind,

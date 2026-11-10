@@ -1145,6 +1145,11 @@
           "placeholder": "Entrez l'URL de redirection ici, par exemple, https://example.com",
           "invalidUrl": "L'URL de redirection n'est pas valide"
         },
+        "pseudonymId": {
+          "headline": "Identifiants pseudonymes",
+          "subHeadline": "Générez un identifiant de réponse unique et affichez-le après l'envoi.",
+          "column": "Identifiant de réponse"
+        },
         "progressBar": {
           "headline": "Barre de progression",
           "subHeadline": "Vous pouvez facilement informer les répondants de leur avancement dans le formulaire."
@@ -1305,6 +1310,10 @@
       "sidebar": {
         "questions": "Questions",
         "addQuestion": "Ajouter une question",
+        "collapseQuestions": "Réduire les questions",
+        "expandQuestions": "Développer les questions",
+        "hideSettings": "Masquer le panneau des paramètres",
+        "showSettings": "Afficher le panneau des paramètres",
         "endings": "Fins",
         "addEndingTip": "Ajoutez une nouvelle fin. Vous pouvez créer plusieurs fins et implémenter une logique pour déterminer laquelle les gens verront."
       },

@@ -32,16 +32,22 @@ export function getDateFormat(format: string, allowTime?: boolean): string {
 }
 
 export function isDate(input: string, format = 'MM/DD/YYYY'): boolean {
+  return parseDate(input, format) !== undefined
+}
+
+// Reads the date the way isDate accepts it: one number per format token, so `2026-4-5` is
+// 5 April 2026 for `YYYY-MM-DD` even though a strict dayjs parse rejects it.
+export function parseDate(input: unknown, format = 'MM/DD/YYYY'): Date | undefined {
   // A date range's start/end comes straight from the request and may not be a string
   if (typeof input !== 'string') {
-    return false
+    return undefined
   }
 
   const inputArr = input.match(REGEX_NUMBERS)
   const formatArr = format.match(REGEX_FORMAT)
 
   if (!inputArr || !formatArr || inputArr.length !== formatArr.length) {
-    return false
+    return undefined
   }
 
   const dateObject: Record<string, number> = {}
@@ -58,21 +64,18 @@ export function isDate(input: string, format = 'MM/DD/YYYY'): boolean {
     dateObject.mm || 0
   )
 
-  if (dateObject.HH && dateObject.mm) {
-    return (
-      date.getFullYear() === +dateObject.YYYY &&
-      date.getMonth() === dateObject.MM - 1 &&
-      date.getDate() === dateObject.DD &&
-      date.getHours() === dateObject.HH &&
-      date.getMinutes() === dateObject.mm
-    )
-  }
+  const isValid =
+    dateObject.HH && dateObject.mm
+      ? date.getFullYear() === +dateObject.YYYY &&
+        date.getMonth() === dateObject.MM - 1 &&
+        date.getDate() === dateObject.DD &&
+        date.getHours() === dateObject.HH &&
+        date.getMinutes() === dateObject.mm
+      : date.getFullYear() === +dateObject.YYYY &&
+        date.getMonth() === dateObject.MM - 1 &&
+        date.getDate() === +dateObject.DD
 
-  return (
-    date.getFullYear() === +dateObject.YYYY &&
-    date.getMonth() === dateObject.MM - 1 &&
-    date.getDate() === +dateObject.DD
-  )
+  return isValid ? date : undefined
 }
 
 export function isEqual(arg1: unknown, arg2: unknown): boolean {

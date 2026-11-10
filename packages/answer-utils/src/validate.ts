@@ -4,7 +4,7 @@ import { helper, type } from '@heyform-inc/utils'
 
 import dayjs from './dayjs'
 import { FieldsToValidateRules, fieldsToValidateRules } from './fields-to-validate-rules'
-import { isDate, isMobilePhone } from './helper'
+import { isDate, isMobilePhone, parseDate } from './helper'
 
 export interface ValidateErrorResponse {
   id: string
@@ -391,7 +391,12 @@ function validateDateRange(rule: FieldsToValidateRules, value: AnswerValue) {
     })
   }
 
-  if (!isDate(value.start, rule.format!)) {
+  // rule.format already includes the time token when the field allows it. Every date that is
+  // valid here is also order-checked below, including unpadded ones such as `2026-4-5`.
+  const start = parseDate(value.start, rule.format!)
+  const end = parseDate(value.end, rule.format!)
+
+  if (!start) {
     throw new ValidateError({
       id: rule.id,
       kind: rule.kind,
@@ -400,7 +405,7 @@ function validateDateRange(rule: FieldsToValidateRules, value: AnswerValue) {
     })
   }
 
-  if (!isDate(value.end, rule.format!)) {
+  if (!end) {
     throw new ValidateError({
       id: rule.id,
       kind: rule.kind,
@@ -409,11 +414,16 @@ function validateDateRange(rule: FieldsToValidateRules, value: AnswerValue) {
     })
   }
 
-  // rule.format already includes the time token when the field allows it.
-  const start = dayjs(value.start, rule.format!, true)
-  const end = dayjs(value.end, rule.format!, true)
+  // A strict parse keeps every token in the format, such as seconds. Unpadded dates fail it, so
+  // order those by the dates isDate accepted.
+  const strictStart = dayjs(value.start, rule.format!, true)
+  const strictEnd = dayjs(value.end, rule.format!, true)
+  const isReversed =
+    strictStart.isValid() && strictEnd.isValid()
+      ? strictEnd.isBefore(strictStart)
+      : end.getTime() < start.getTime()
 
-  if (start.isValid() && end.isValid() && end.isBefore(start)) {
+  if (isReversed) {
     throw new ValidateError({
       id: rule.id,
       kind: rule.kind,

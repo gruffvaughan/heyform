@@ -150,6 +150,65 @@ test('a DD/MM/YYYY date range with time is ordered by the field format', () => {
   )
 })
 
+test('a date range is ordered however its dates are written', () => {
+  const [rule] = fieldsToValidateRules([
+    {
+      id: 'range',
+      title: 'Range',
+      kind: FieldKindEnum.DATE_RANGE,
+      properties: { format: 'YYYY-MM-DD' }
+    }
+  ])
+
+  // isDate accepts unpadded numbers, so the order check must read them too
+  expect(() => validate(rule, { start: '2026-4-5', end: '2026-3-6' })).toThrow(
+    'End date must be after start date'
+  )
+  expect(() => validate(rule, { start: '2026-04-05', end: '2026-3-6' })).toThrow(
+    'End date must be after start date'
+  )
+  expect(validate(rule, { start: '2026-3-6', end: '2026-4-5' })).toBe(undefined)
+  expect(validate(rule, { start: '2026-03-06', end: '2026-4-5' })).toBe(undefined)
+  expect(validate(rule, { start: '2026-03-06', end: '2026-04-05' })).toBe(undefined)
+  expect(() => validate(rule, { start: '2026-04-05', end: '2026-03-06' })).toThrow(
+    'End date must be after start date'
+  )
+})
+
+test('a date range with time is ordered however its dates are written', () => {
+  const [rule] = fieldsToValidateRules([
+    {
+      id: 'range',
+      title: 'Range',
+      kind: FieldKindEnum.DATE_RANGE,
+      properties: { format: 'DD/MM/YYYY', allowTime: true }
+    }
+  ])
+
+  expect(() => validate(rule, { start: '5/4/2026 9:30', end: '5/4/2026 9:15' })).toThrow(
+    'End date must be after start date'
+  )
+  expect(validate(rule, { start: '5/4/2026 9:15', end: '5/4/2026 9:30' })).toBe(undefined)
+})
+
+test('a date range in a custom format with seconds is ordered to the second', () => {
+  const [rule] = fieldsToValidateRules([
+    {
+      id: 'range',
+      title: 'Range',
+      kind: FieldKindEnum.DATE_RANGE,
+      properties: { format: 'YYYY-MM-DD HH:mm:ss' }
+    }
+  ])
+
+  expect(() =>
+    validate(rule, { start: '2026-04-05 09:30:59', end: '2026-04-05 09:30:01' })
+  ).toThrow('End date must be after start date')
+  expect(validate(rule, { start: '2026-04-05 09:30:01', end: '2026-04-05 09:30:59' })).toBe(
+    undefined
+  )
+})
+
 test('a condition date saved in another shape still matches', () => {
   const field = dateField('DD/MM/YYYY')
 

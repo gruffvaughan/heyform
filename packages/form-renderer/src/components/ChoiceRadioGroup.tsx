@@ -25,6 +25,9 @@ interface ChoiceRadioGroupProps extends Omit<IComponentProps, 'onChange'> {
   onChange?: (value: any) => void
 }
 
+// Bulk actions appear on multi-select questions with more options than this.
+const BULK_ACTIONS_THRESHOLD = 5
+
 function resetArray(arr: any) {
   return (helper.isArray(arr) ? arr : [arr]).filter(helper.isValid)
 }
@@ -50,11 +53,13 @@ export const ChoiceRadioGroup: FC<ChoiceRadioGroupProps> = ({
   const values = useMemo(() => resetArray(rawValue?.value || []), [rawValue])
   const otherValue = useMemo(() => rawValue?.other, [rawValue])
 
-  const isDisabled = useMemo(
-    () => max > 0 && values.length + (allowOther && isOtherFilled ? 1 : 0) >= max,
-    [allowOther, isOtherFilled, max, values.length]
-  )
+  const selectedCount = values.length + (allowOther && isOtherFilled ? 1 : 0)
+  const isDisabled = max > 0 && selectedCount >= max
   const [isOtherSelected, setIsOtherSelected] = useState(false)
+
+  const isBulkActionsShow = allowMultiple && max !== 1 && options.length > BULK_ACTIONS_THRESHOLD
+  const choiceCount = options.length + (allowOther ? 1 : 0)
+  const isAllSelected = options.every(option => values.includes(option.value))
 
   const handleClick = useCallback(
     (value: any) => {
@@ -82,6 +87,18 @@ export const ChoiceRadioGroup: FC<ChoiceRadioGroupProps> = ({
     },
     [allowMultiple, isDisabled, onChange, otherValue, values]
   )
+
+  const handleSelectAll = useCallback(() => {
+    onChange?.({
+      value: options.map(option => option.value),
+      other: otherValue
+    })
+  }, [onChange, options, otherValue])
+
+  const handleUnselectAll = useCallback(() => {
+    setIsOtherSelected(false)
+    onChange?.({ value: [], other: undefined })
+  }, [onChange])
 
   const handleOtherChange = useCallback(
     (newOtherValue: string) => {
@@ -168,6 +185,42 @@ export const ChoiceRadioGroup: FC<ChoiceRadioGroupProps> = ({
       )}
       {...restProps}
     >
+      {isBulkActionsShow && (
+        <div className="heyform-choice-actions">
+          <span className="heyform-choice-count">
+            {t('{{selected}} of {{total}}', {
+              selected: selectedCount,
+              total: max > 0 ? Math.min(max, choiceCount) : choiceCount
+            })}
+          </span>
+
+          <span className="heyform-choice-action-list">
+            {/* A limit couldn't be honoured by selecting everything. */}
+            {max < 1 && (
+              <>
+                <button
+                  type="button"
+                  className="heyform-choice-action"
+                  disabled={isAllSelected}
+                  onClick={handleSelectAll}
+                >
+                  {t('Select all')}
+                </button>
+                <span aria-hidden="true">·</span>
+              </>
+            )}
+            <button
+              type="button"
+              className="heyform-choice-action"
+              disabled={selectedCount < 1 && !isOtherSelected}
+              onClick={handleUnselectAll}
+            >
+              {t('Unselect all')}
+            </button>
+          </span>
+        </div>
+      )}
+
       {options.map(option => (
         <ChoiceRadio
           key={option.value as string}

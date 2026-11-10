@@ -82,7 +82,7 @@ export const ChoiceRadio: FC<ChoiceRadioProps> = ({
     }
 
     return label
-  }, [isChecked, isOther, label, value])
+  }, [handleInputChange, isChecked, isOther, label, onBlur, value])
 
   useKey(keyName?.toLowerCase() as string, handleClick)
 

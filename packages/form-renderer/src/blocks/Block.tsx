@@ -294,7 +294,8 @@ export const Block: FC<BlockProps> = ({
             'input:not([type="hidden"]):not([disabled])',
             'textarea:not([disabled])',
             'select:not([disabled])',
-            'button:not([disabled])',
+            // Bulk actions come first in the DOM, but a question's main action is its Next button.
+            'button:not([disabled]):not(.heyform-choice-action)',
             '[contenteditable="true"]',
             '[tabindex]:not([tabindex="-1"]):not([disabled])'
           ].join(',')

@@ -41,8 +41,8 @@ async function testPasswordRegistrationPolicy() {
       createMember: async () => undefined
     } as any,
     {
-      addMemberToDefaultProject: async (teamId: string, memberId: string) => {
-        defaultProjectJoins.push([teamId, memberId])
+      addMemberToDefaultProject: async (team: { id: string }, memberId: string) => {
+        defaultProjectJoins.push([team.id, memberId])
       }
     } as any
   )

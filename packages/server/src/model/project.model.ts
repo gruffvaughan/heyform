@@ -25,6 +25,11 @@ export class ProjectModel extends Document {
   @Prop()
   avatar?: string
 
+  // The project the workspace was created with, which a joiner lands in. Stored as false on every
+  // other project, so a project without the field predates it.
+  @Prop({ default: false })
+  isDefault?: boolean
+
   /**
    * Attach references to the project model for easy query,
    * will not be used as a column in the project schema

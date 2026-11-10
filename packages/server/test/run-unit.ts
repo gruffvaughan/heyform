@@ -37,6 +37,7 @@ const tests = [
   'form-analytic-cache.test.ts',
   'form-team-scope.test.ts',
   'join-team-project.test.ts',
+  'default-project.test.ts',
   'submission-choice-limit.test.ts',
   'complete-submission-security.test.ts',
   'payment-webhook.test.ts',

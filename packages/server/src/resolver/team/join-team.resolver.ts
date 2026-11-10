@@ -46,7 +46,7 @@ export class JoinTeamResolver {
       role: TeamRoleEnum.COLLABORATOR
     })
 
-    await this.projectService.addMemberToDefaultProject(input.teamId, user.id)
+    await this.projectService.addMemberToDefaultProject(team, user.id)
 
     const teamOwner = await this.userService.findById(team.ownerId)
 

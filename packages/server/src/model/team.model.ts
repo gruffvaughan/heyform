@@ -45,6 +45,8 @@ export class TeamModel extends Document {
   @Prop()
   storageQuota?: number
 
+  createdAt?: Date
+
   /**
    * Attach references to the team model for easy query,
    * will not be used as a column in the team schema

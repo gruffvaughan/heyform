@@ -3,7 +3,11 @@ import { InjectModel } from '@nestjs/mongoose'
 import { Model } from 'mongoose'
 
 import { helper } from '@heyform-inc/utils'
-import { ProjectMemberModel, ProjectModel } from '@model'
+import { ProjectMemberModel, ProjectModel, TeamModel } from '@model'
+
+// createTeam inserts the workspace and its first project a few writes apart, in one request. Making
+// another project by hand (open the dialog, type a name, submit) takes longer than this.
+const CREATED_WITH_TEAM_MS = 2 * 1000
 
 @Injectable()
 export class ProjectService {
@@ -24,12 +28,30 @@ export class ProjectService {
       })
   }
 
-  // The project a member who joins the workspace lands in: the one created with the team. Newest
-  // first is what every other listing wants, so this asks the other way round.
-  async findDefaultInTeam(teamId: string): Promise<ProjectModel | null> {
+  // The project a member who joins the workspace lands in: the one it was created with. Once that
+  // is deleted there is no default, rather than whichever project is now the oldest, which may be
+  // one the owner keeps to a few members.
+  async findDefaultInTeam(team: TeamModel): Promise<ProjectModel | null> {
+    const project = await this.projectModel.findOne({
+      teamId: team.id,
+      isDefault: true
+    })
+
+    if (project || !team.createdAt) {
+      return project
+    }
+
+    // A workspace from before isDefault: its first project, if it's still there, is the oldest one
+    // without the field and was created with the team
     return this.projectModel
       .findOne({
-        teamId
+        teamId: team.id,
+        isDefault: {
+          $exists: false
+        },
+        createdAt: {
+          $lte: new Date(new Date(team.createdAt).getTime() + CREATED_WITH_TEAM_MS)
+        }
       })
       .sort({
         createdAt: 1
@@ -39,8 +61,8 @@ export class ProjectService {
   // A member of the workspace who belongs to no project can see none of its forms, so a joiner
   // starts in the project the workspace was created with. Removing or leaving the workspace
   // already deletes the project memberships.
-  async addMemberToDefaultProject(teamId: string, memberId: string): Promise<void> {
-    const project = await this.findDefaultInTeam(teamId)
+  async addMemberToDefaultProject(team: TeamModel, memberId: string): Promise<void> {
+    const project = await this.findDefaultInTeam(team)
 
     // A project can already name this member before they join the workspace
     if (project && !(await this.findMemberById(project.id, memberId))) {
@@ -180,7 +202,8 @@ export class ProjectService {
     const projectId = await this.create({
       teamId,
       name: projectName,
-      ownerId
+      ownerId,
+      isDefault: true
     })
 
     await this.createMember({

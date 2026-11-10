@@ -78,7 +78,7 @@ export class SignUpResolver {
       }
 
       // After the rollback above, so a failure here can't leave a workspace member with no user
-      await this.projectService.addMemberToDefaultProject(invitation.id, userId)
+      await this.projectService.addMemberToDefaultProject(invitation, userId)
 
       const teamOwner = await this.userService.findById(invitation.ownerId)
 
